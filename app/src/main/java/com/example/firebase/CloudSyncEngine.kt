@@ -138,7 +138,14 @@ internal object CloudSyncEngine {
 
             if (shouldFetchUpdated || shouldFetchLegacyOnce) {
                 val source = if (shouldFetchUpdated && localVer >= 0L) Source.SERVER else Source.DEFAULT
-                val ok = fetchAndApplySection(firestore, section, repository, source, currentSalaryRules)
+                val ok = fetchAndApplySection(
+                    firestore = firestore,
+                    section = section,
+                    repository = repository,
+                    preferredSource = source,
+                    currentSalaryRules = currentSalaryRules,
+                    allowEmptySync = serverVer > 0L
+                )
                 if (ok) {
                     editor.putLong(PREF_VER_PREFIX + section.versionKey, serverVer)
                     syncedCount++
@@ -238,7 +245,8 @@ internal object CloudSyncEngine {
         section: CloudSection,
         repository: AppRepository,
         preferredSource: Source,
-        currentSalaryRules: MutableStateFlow<Triple<Double, Double, Double>>
+        currentSalaryRules: MutableStateFlow<Triple<Double, Double, Double>>,
+        allowEmptySync: Boolean = false
     ): Boolean {
         return try {
             when (section) {
@@ -330,7 +338,7 @@ internal object CloudSyncEngine {
                             isActive = doc.getBoolean("isActive") ?: true
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncBannersFromCloud(list)
                     }
                 }
@@ -388,7 +396,7 @@ internal object CloudSyncEngine {
                             displayOrder = doc.getLong("displayOrder")?.toInt() ?: idx
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncVideosFromCloud(list)
                     }
                 }
@@ -448,7 +456,7 @@ internal object CloudSyncEngine {
                             isVisible = doc.getBoolean("isVisible") ?: true
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncNewsFromCloud(list)
                     }
                 }
@@ -469,7 +477,7 @@ internal object CloudSyncEngine {
                             externalUrl = doc.getString("externalUrl") ?: ""
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncFeatureBoxesFromCloud(list.sortedBy { it.displayOrder })
                     }
                 }
@@ -552,7 +560,7 @@ internal object CloudSyncEngine {
                             displayOrder = (doc.getLong("displayOrder") ?: (idx + 1).toLong()).toInt()
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncHomeTopLinksFromCloud(list.sortedBy { it.displayOrder })
                     }
                 }
@@ -572,7 +580,7 @@ internal object CloudSyncEngine {
                             displayOrder = (doc.getLong("displayOrder") ?: (idx + 1).toLong()).toInt()
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncComplaintOptionsFromCloud(list.sortedBy { it.displayOrder })
                     }
                 }
@@ -594,7 +602,7 @@ internal object CloudSyncEngine {
                             displayOrder = (doc.getLong("displayOrder") ?: (idx + 1).toLong()).toInt()
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncFinancialServicesFromCloud(list.sortedBy { it.displayOrder })
                     }
                 }
@@ -612,7 +620,7 @@ internal object CloudSyncEngine {
                             isVisible = doc.getBoolean("isVisible") ?: true
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncYouTubeFeedsFromCloud(list.sortedBy { it.id })
                     }
                 }
@@ -629,7 +637,7 @@ internal object CloudSyncEngine {
                             isVisible = doc.getBoolean("isVisible") ?: true
                         )
                     }
-                    if (list.isNotEmpty()) {
+                    if (list.isNotEmpty() || allowEmptySync) {
                         repository.syncNewsRssFeedsFromCloud(list.sortedBy { it.id })
                     }
                 }

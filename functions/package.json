@@ -1,0 +1,13 @@
+{
+  "name": "shikshak-sathi-functions",
+  "description": "Cloud Functions for Shikshak Sathi Bihar",
+  "engines": {
+    "node": "20"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "firebase-admin": "^13.2.0",
+    "firebase-functions": "^6.3.2"
+  }
+}

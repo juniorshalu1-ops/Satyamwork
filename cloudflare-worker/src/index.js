@@ -37,6 +37,7 @@ const ALLOWED_MIME_TYPES = new Set([
 
 let cachedJwks = null;
 let cachedJwksExpiresAt = 0;
+let lastJwksForceFetchAt = 0;
 
 export default {
   async fetch(request, env, ctx) {
@@ -286,7 +287,7 @@ async function handleAdminUpload(request, env, url, adminEmail) {
   // Delete replaced R2 file if provided & valid
   let replacedDeleted = false;
   if (replaceUrlOrKey) {
-    const oldKey = extractKeyFromUrlOrKey(replaceUrlOrKey);
+    const oldKey = extractKeyFromUrlOrKey(replaceUrlOrKey, env);
     if (oldKey && oldKey !== objectKey) {
       await env.R2_BUCKET.delete(oldKey);
       await purgeEdgeCache(url.origin, oldKey);
@@ -333,7 +334,7 @@ async function handleAdminDelete(request, env, url) {
   const keysToDelete = [
     ...new Set(
       candidates
-        .map((c) => extractKeyFromUrlOrKey(c))
+        .map((c) => extractKeyFromUrlOrKey(c, env))
         .filter((k) => Boolean(k))
     ),
   ];
@@ -518,21 +519,31 @@ async function verifyAdminFirebaseToken(request, env) {
   return { ok: true, email, uid: payload.sub };
 }
 
+async function fetchGoogleJwks(now) {
+  const resp = await fetch(GOOGLE_JWKS_URL);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch Google JWKS: ${resp.status}`);
+  }
+  const cacheControl = resp.headers.get("cache-control") || "";
+  const maxAgeMatch = /max-age=(\d+)/i.exec(cacheControl);
+  const maxAgeMs = maxAgeMatch ? Number(maxAgeMatch[1]) * 1000 : 3600 * 1000;
+  const data = await resp.json();
+  cachedJwks = Array.isArray(data.keys) ? data.keys : [];
+  cachedJwksExpiresAt = now + Math.max(maxAgeMs, 60 * 1000);
+}
+
 async function getGoogleSigningJwk(kid) {
   const now = Date.now();
   if (!cachedJwks || now >= cachedJwksExpiresAt) {
-    const resp = await fetch(GOOGLE_JWKS_URL);
-    if (!resp.ok) {
-      throw new Error(`Failed to fetch Google JWKS: ${resp.status}`);
-    }
-    const cacheControl = resp.headers.get("cache-control") || "";
-    const maxAgeMatch = /max-age=(\d+)/i.exec(cacheControl);
-    const maxAgeMs = maxAgeMatch ? Number(maxAgeMatch[1]) * 1000 : 3600 * 1000;
-    const data = await resp.json();
-    cachedJwks = Array.isArray(data.keys) ? data.keys : [];
-    cachedJwksExpiresAt = now + Math.max(maxAgeMs, 60 * 1000);
+    await fetchGoogleJwks(now);
   }
-  return cachedJwks.find((k) => k.kid === kid) || null;
+  let match = cachedJwks.find((k) => k.kid === kid) || null;
+  if (!match && now - lastJwksForceFetchAt > 15_000) {
+    lastJwksForceFetchAt = now;
+    await fetchGoogleJwks(now);
+    match = cachedJwks.find((k) => k.kid === kid) || null;
+  }
+  return match;
 }
 
 function buildPublicFileUrl(env, workerOrigin, objectKey) {
@@ -543,7 +554,7 @@ function buildPublicFileUrl(env, workerOrigin, objectKey) {
   return `${workerOrigin.replace(/\/+$/, "")}/files/${objectKey}`;
 }
 
-function extractKeyFromUrlOrKey(raw) {
+function extractKeyFromUrlOrKey(raw, env) {
   const value = String(raw || "").trim();
   if (!value) return "";
 
@@ -552,6 +563,12 @@ function extractKeyFromUrlOrKey(raw) {
   }
 
   try {
+    const publicBase = ((env && env.R2_PUBLIC_BASE_URL) || "").trim().replace(/\/+$/, "");
+    if (publicBase && value.startsWith(`${publicBase}/`)) {
+      const remainder = value.slice(publicBase.length + 1).split("?")[0];
+      return sanitizeObjectKey(decodeURIComponent(remainder));
+    }
+
     const parsed = new URL(value);
     const pathname = decodeURIComponent(parsed.pathname || "");
     if (pathname.startsWith("/files/")) {

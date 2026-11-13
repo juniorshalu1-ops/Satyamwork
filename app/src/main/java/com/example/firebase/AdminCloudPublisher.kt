@@ -35,7 +35,6 @@ import com.example.database.entities.VideoTutorialEntity
 import com.example.database.entities.WhatsAppBannerEntity
 import com.example.database.entities.WhatsAppLinkConfigEntity
 import com.example.database.entities.YouTubeFeedEntity
-import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -44,6 +43,7 @@ import com.google.firebase.firestore.WriteBatch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.security.MessageDigest
 import java.util.UUID
 
 internal object AdminCloudPublisher {
@@ -105,79 +105,73 @@ internal object AdminCloudPublisher {
         targetUrl: String = ""
     ): Boolean {
         return try {
-            val baseSeq = when {
-                knownBroadcastSeq > 0L -> knownBroadcastSeq
-                else -> {
-                    val localSeq = sharedPrefs.getLong(KEY_ADMIN_BROADCAST_SEQ, 0L)
-                    if (localSeq > 0L) {
-                        localSeq
-                    } else {
-                        try {
-                            versionsDoc(firestore).get().await().getLong(CloudSection.BROADCAST_SEQ_KEY) ?: 0L
-                        } catch (_: Exception) {
-                            0L
-                        }
-                    }
-                }
-            }
-            val nextSeq = baseSeq + 1L
-            val slotIndex = ((nextSeq - 1L) % MAX_BROADCAST_HISTORY).toInt()
-            val historyDocId = "history_$slotIndex"
-
             val alertId = UUID.randomUUID().toString()
-            val nowTs = Timestamp.now()
-
-            val latestAlertData = hashMapOf(
-                "alertId" to alertId,
-                "title" to title,
-                "section" to section,
-                "details" to details,
-                "contentType" to contentType,
-                "contentId" to contentId,
-                "targetSection" to targetSection,
-                "targetUrl" to targetUrl,
-                "adminEmail" to "satyamprakash100@gmail.com",
-                "timestamp" to nowTs,
-                "loudAlert" to false,
-                "isHistory" to false
-            )
-
-            val historySlotData = hashMapOf(
-                "alertId" to alertId,
-                "title" to title,
-                "section" to section,
-                "details" to details,
-                "contentType" to contentType,
-                "contentId" to contentId,
-                "targetSection" to targetSection,
-                "targetUrl" to targetUrl,
-                "adminEmail" to "satyamprakash100@gmail.com",
-                "timestamp" to nowTs,
-                "loudAlert" to false,
-                "isHistory" to true,
-                "slotIndex" to slotIndex,
-                "seq" to nextSeq
-            )
+            val localFallbackSeq = maxOf(knownBroadcastSeq, sharedPrefs.getLong(KEY_ADMIN_BROADCAST_SEQ, 0L))
 
             // Pre-record alertId on broadcaster device so single version listener doesn't re-sound
             sharedPrefs.edit()
                 .putString(CloudSyncEngine.KEY_LAST_ALERT_ID, alertId)
-                .putLong(KEY_ADMIN_BROADCAST_SEQ, nextSeq)
                 .apply()
 
-            val batch = firestore.batch()
-            batch.set(firestore.collection("admin_broadcasts").document("latest_alert"), latestAlertData)
-            batch.set(firestore.collection("admin_broadcasts").document(historyDocId), historySlotData)
-            batch.set(
-                versionsDoc(firestore),
-                mapOf(
-                    CloudSection.ALERT_VERSION_KEY to FieldValue.increment(1),
-                    CloudSection.BROADCAST_SEQ_KEY to nextSeq,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                ),
-                SetOptions.merge()
-            )
-            batch.commit().await()
+            val nextSeq = firestore.runTransaction { tx ->
+                val vRef = versionsDoc(firestore)
+                val vSnap = tx.get(vRef)
+                val remoteSeq = vSnap.getLong(CloudSection.BROADCAST_SEQ_KEY) ?: 0L
+                val remoteAlertV = vSnap.getLong(CloudSection.ALERT_VERSION_KEY) ?: 0L
+                val computedNextSeq = maxOf(localFallbackSeq, remoteSeq) + 1L
+                val slotIndex = ((computedNextSeq - 1L) % MAX_BROADCAST_HISTORY).toInt()
+                val historyDocId = "history_$slotIndex"
+
+                val latestAlertData = hashMapOf<String, Any>(
+                    "alertId" to alertId,
+                    "title" to title,
+                    "section" to section,
+                    "details" to details,
+                    "contentType" to contentType,
+                    "contentId" to contentId,
+                    "targetSection" to targetSection,
+                    "targetUrl" to targetUrl,
+                    "adminEmail" to "satyamprakash100@gmail.com",
+                    "timestamp" to FieldValue.serverTimestamp(),
+                    "loudAlert" to false,
+                    "isHistory" to false
+                )
+
+                val historySlotData = hashMapOf<String, Any>(
+                    "alertId" to alertId,
+                    "title" to title,
+                    "section" to section,
+                    "details" to details,
+                    "contentType" to contentType,
+                    "contentId" to contentId,
+                    "targetSection" to targetSection,
+                    "targetUrl" to targetUrl,
+                    "adminEmail" to "satyamprakash100@gmail.com",
+                    "timestamp" to FieldValue.serverTimestamp(),
+                    "loudAlert" to false,
+                    "isHistory" to true,
+                    "slotIndex" to slotIndex,
+                    "seq" to computedNextSeq
+                )
+
+                tx.set(firestore.collection("admin_broadcasts").document("latest_alert"), latestAlertData)
+                tx.set(firestore.collection("admin_broadcasts").document(historyDocId), historySlotData)
+                tx.set(
+                    vRef,
+                    mapOf(
+                        CloudSection.ALERT_VERSION_KEY to (remoteAlertV + 1L),
+                        CloudSection.BROADCAST_SEQ_KEY to computedNextSeq,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                computedNextSeq
+            }.await()
+
+            sharedPrefs.edit()
+                .putString(CloudSyncEngine.KEY_LAST_ALERT_ID, alertId)
+                .putLong(KEY_ADMIN_BROADCAST_SEQ, nextSeq)
+                .apply()
 
             onSeqUpdated(nextSeq)
             onHistoryPrepended(
@@ -186,7 +180,7 @@ internal object AdminCloudPublisher {
                     title = title,
                     section = section,
                     details = details,
-                    timestamp = nowTs.toDate().time
+                    timestamp = System.currentTimeMillis()
                 )
             )
             SoundNotificationHelper.triggerSpecialAdminNotification(
@@ -201,7 +195,7 @@ internal object AdminCloudPublisher {
             )
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Error broadcasting admin upload", e)
+            FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "admin_broadcasts/latest_alert")
             false
         }
     }
@@ -214,7 +208,7 @@ internal object AdminCloudPublisher {
         sendNotification: Boolean,
         notifyTypedFn: (suspend (String, String, String, String, String, String, String) -> Boolean)? = null
     ): Boolean = try {
-        val docData = hashMapOf(
+        val docData = hashMapOf<String, Any>(
             "title" to notice.title,
             "summary" to notice.summary,
             "category" to notice.category,
@@ -226,9 +220,10 @@ internal object AdminCloudPublisher {
             "imageUrl" to notice.imageUrl,
             "isFeatured" to notice.isFeatured,
             "isPublished" to true,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
-        val docRef = firestore.collection("notices").document(getNoticeDocId(notice))
+        val docId = getNoticeDocId(notice)
+        val docRef = firestore.collection("notices").document(docId)
         commitSingleDocWithVersionBump(firestore, docRef, docData, CloudSection.NOTICES.versionKey)
         if (sendNotification) {
             val noticeTitle = "नया विभागीय आदेश: ${notice.title}"
@@ -243,20 +238,24 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing notice", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "notices/${getNoticeDocId(notice)}")
         false
     }
 
     suspend fun deleteNoticeFromCloud(firestore: FirebaseFirestore, notice: NoticeEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("notices").document(getNoticeDocId(notice)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("notices").document(getNoticeDocId(notice)))
         if (notice.title.isNotBlank()) {
             val matches = firestore.collection("notices").whereEqualTo("title", notice.title).get().await()
-            matches.documents.forEach { batch.delete(it.reference) }
+            matches.documents.forEach { addDelete(it.reference) }
         }
         if (notice.orderNumber.isNotBlank()) {
             val matches = firestore.collection("notices").whereEqualTo("orderNumber", notice.orderNumber).get().await()
-            matches.documents.forEach { batch.delete(it.reference) }
+            matches.documents.forEach { addDelete(it.reference) }
         }
         batch.set(
             versionsDoc(firestore),
@@ -266,7 +265,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting notice", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "notices/${getNoticeDocId(notice)}")
         false
     }
 
@@ -278,7 +277,7 @@ internal object AdminCloudPublisher {
         sendNotification: Boolean,
         notifyTypedFn: (suspend (String, String, String, String, String, String, String) -> Boolean)? = null
     ): Boolean = try {
-        val docData = hashMapOf(
+        val docData = hashMapOf<String, Any>(
             "name" to holiday.name,
             "dateStr" to holiday.dateStr,
             "dayOfWeek" to holiday.dayOfWeek,
@@ -286,7 +285,7 @@ internal object AdminCloudPublisher {
             "type" to holiday.type,
             "durationDays" to holiday.durationDays,
             "description" to holiday.description,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("holiday_calendars").document(getHolidayDocId(holiday))
         commitSingleDocWithVersionBump(firestore, docRef, docData, CloudSection.HOLIDAYS.versionKey)
@@ -303,15 +302,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing holiday", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "holiday_calendars/${getHolidayDocId(holiday)}")
         false
     }
 
     suspend fun deleteHolidayFromCloud(firestore: FirebaseFirestore, holiday: HolidayEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("holiday_calendars").document(getHolidayDocId(holiday)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("holiday_calendars").document(getHolidayDocId(holiday)))
         val matches = firestore.collection("holiday_calendars").whereEqualTo("name", holiday.name).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.HOLIDAYS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -320,7 +323,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting holiday", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "holiday_calendars/${getHolidayDocId(holiday)}")
         false
     }
 
@@ -331,13 +334,13 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val docData = hashMapOf(
+        val docData = hashMapOf<String, Any>(
             "title" to activity.title,
             "description" to activity.description,
             "category" to activity.category,
             "linkUrl" to activity.linkUrl,
             "orderNumber" to activity.orderNumber,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("activities").document(getActivityDocId(activity))
         commitSingleDocWithVersionBump(firestore, docRef, docData, CloudSection.ACTIVITIES.versionKey)
@@ -346,15 +349,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing activity", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "activities/${getActivityDocId(activity)}")
         false
     }
 
     suspend fun deleteActivityFromCloud(firestore: FirebaseFirestore, activity: EducationActivityEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("activities").document(getActivityDocId(activity)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("activities").document(getActivityDocId(activity)))
         val matches = firestore.collection("activities").whereEqualTo("title", activity.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.ACTIVITIES.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -363,7 +370,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting activity", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "activities/${getActivityDocId(activity)}")
         false
     }
 
@@ -374,13 +381,13 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val docData = hashMapOf(
+        val docData = hashMapOf<String, Any>(
             "title" to portal.title,
             "subtitle" to portal.subtitle,
             "url" to portal.url,
             "badge" to portal.badge,
             "colorHex" to portal.colorHex,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("quick_portals").document(getPortalDocId(portal))
         commitSingleDocWithVersionBump(firestore, docRef, docData, CloudSection.PORTALS.versionKey)
@@ -389,15 +396,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing portal", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "quick_portals/${getPortalDocId(portal)}")
         false
     }
 
     suspend fun deletePortalFromCloud(firestore: FirebaseFirestore, portal: QuickPortalEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("quick_portals").document(getPortalDocId(portal)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("quick_portals").document(getPortalDocId(portal)))
         val matches = firestore.collection("quick_portals").whereEqualTo("title", portal.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.PORTALS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -406,7 +417,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting portal", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "quick_portals/${getPortalDocId(portal)}")
         false
     }
 
@@ -419,12 +430,12 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val ruleData = hashMapOf(
+        val ruleData = hashMapOf<String, Any>(
             "daPercent" to daPercent,
             "ruralHra" to ruralHra,
             "urbanHra" to urbanHra,
             "effectiveDate" to "01/11/2026",
-            "publishedAt" to Timestamp.now()
+            "publishedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("salary_rules").document("current")
         commitSingleDocWithVersionBump(firestore, docRef, ruleData, CloudSection.SALARY_RULES.versionKey)
@@ -437,7 +448,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing salary rule", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "salary_rules/current")
         false
     }
 
@@ -448,8 +459,8 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val docId = if (banner.bannerId.isNotBlank()) banner.bannerId else "banner_${System.currentTimeMillis()}"
-        val data = hashMapOf(
+        val docId = resolveBannerDocId(banner)
+        val data = hashMapOf<String, Any>(
             "bannerId" to docId,
             "title" to banner.title,
             "description" to banner.description,
@@ -459,7 +470,7 @@ internal object AdminCloudPublisher {
             "buttonText" to banner.buttonText,
             "orderIndex" to banner.orderIndex,
             "isActive" to banner.isActive,
-            "publishedAt" to Timestamp.now()
+            "publishedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("promo_banners").document(docId)
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.BANNERS.versionKey)
@@ -468,13 +479,31 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing banner", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "promo_banners/${resolveBannerDocId(banner)}")
         false
     }
 
-    suspend fun deleteBannerFromCloud(firestore: FirebaseFirestore, bannerId: String): Boolean = try {
+    suspend fun deleteBannerFromCloud(
+        firestore: FirebaseFirestore,
+        bannerId: String,
+        title: String = ""
+    ): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("promo_banners").document(bannerId))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        if (bannerId.isNotBlank()) {
+            if (isSafeDocId(bannerId)) {
+                addDelete(firestore.collection("promo_banners").document(bannerId))
+            }
+            val idMatches = firestore.collection("promo_banners").whereEqualTo("bannerId", bannerId).get().await()
+            idMatches.documents.forEach { addDelete(it.reference) }
+        }
+        if (title.isNotBlank()) {
+            val titleMatches = firestore.collection("promo_banners").whereEqualTo("title", title).get().await()
+            titleMatches.documents.forEach { addDelete(it.reference) }
+        }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.BANNERS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -483,7 +512,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting banner", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "promo_banners/$bannerId")
         false
     }
 
@@ -494,12 +523,12 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "openingTime" to timing.openingTime,
             "closingTime" to timing.closingTime,
             "isManuallyClosed" to timing.isManuallyClosed,
             "closureReason" to timing.closureReason,
-            "updatedAt" to Timestamp.now()
+            "updatedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("school_config").document("timings")
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.SCHOOL_TIMING.versionKey)
@@ -513,7 +542,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing school timings", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "school_config/timings")
         false
     }
 
@@ -523,12 +552,12 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "channelUrl" to config.channelUrl,
             "channelTitle" to config.channelTitle,
             "districtGroupsUrl" to config.districtGroupsUrl,
             "districtGroupsTitle" to config.districtGroupsTitle,
-            "updatedAt" to Timestamp.now()
+            "updatedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("whatsapp_config").document("main")
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.WHATSAPP_CONFIG.versionKey)
@@ -537,7 +566,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing whatsapp config", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "whatsapp_config/main")
         false
     }
 
@@ -551,7 +580,7 @@ internal object AdminCloudPublisher {
     ): Boolean = try {
         val docId = getVideoDocId(video)
         val thumb = if (video.thumbnailUrl.isNotBlank()) video.thumbnailUrl else YouTubeUrlHelper.getThumbnailUrl(video.youtubeId)
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to video.id,
             "title" to video.title,
             "category" to video.category,
@@ -563,7 +592,7 @@ internal object AdminCloudPublisher {
             "isPinned" to video.isPinned,
             "isFeaturedOnHome" to video.isFeaturedOnHome,
             "displayOrder" to video.displayOrder,
-            "publishedAt" to Timestamp.now()
+            "publishedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("video_tutorials").document(docId)
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.VIDEOS.versionKey)
@@ -578,17 +607,23 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing video", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "video_tutorials/${getVideoDocId(video)}")
         false
     }
 
     suspend fun deleteVideoFromCloud(firestore: FirebaseFirestore, video: VideoTutorialEntity): Boolean = try {
         val batch = firestore.batch()
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("video_tutorials").document(getVideoDocId(video)))
         if (video.youtubeId.isNotBlank()) {
-            batch.delete(firestore.collection("video_tutorials").document("vid_${video.youtubeId}"))
+            val cleanYtId = "vid_" + video.youtubeId.trim().replace(Regex("[^a-zA-Z0-9_-]+"), "_")
+            addDelete(firestore.collection("video_tutorials").document(cleanYtId))
         }
         val matches = firestore.collection("video_tutorials").whereEqualTo("title", video.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.VIDEOS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -597,7 +632,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting video", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "video_tutorials/${getVideoDocId(video)}")
         false
     }
 
@@ -614,7 +649,7 @@ internal object AdminCloudPublisher {
         }
         val canonicalDownload = if (download.cloudId.isBlank()) download.copy(cloudId = resolvedCid) else download
         val docRef = firestore.collection("download_resources").document(getDownloadDocId(canonicalDownload))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "cloudId" to resolvedCid,
             "title" to canonicalDownload.title,
             "category" to canonicalDownload.category,
@@ -625,7 +660,7 @@ internal object AdminCloudPublisher {
             "description" to canonicalDownload.description,
             "fileType" to canonicalDownload.fileType,
             "isVisible" to canonicalDownload.isVisible,
-            "publishedAt" to Timestamp.now()
+            "publishedAt" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.DOWNLOADS.versionKey)
         if (sendNotification) {
@@ -638,7 +673,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing download", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "download_resources/${getDownloadDocId(download)}")
         false
     }
 
@@ -646,8 +681,8 @@ internal object AdminCloudPublisher {
         val batch = firestore.batch()
         val canonicalId = getDownloadDocId(download)
         val deletedIds = mutableSetOf<String>()
-        fun addDelete(docRef: com.google.firebase.firestore.DocumentReference) {
-            if (deletedIds.add(docRef.id)) {
+        fun addDelete(docRef: DocumentReference) {
+            if (isSafeDocId(docRef.id) && deletedIds.add(docRef.id)) {
                 batch.delete(docRef)
             }
         }
@@ -674,7 +709,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting download", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "download_resources/${getDownloadDocId(download)}")
         false
     }
 
@@ -685,10 +720,10 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "isEnabled" to isEnabled,
             "folderUrl" to (folderUrl ?: DEFAULT_MAIN_DRIVE_FOLDER_URL),
-            "updatedAt" to Timestamp.now()
+            "updatedAt" to FieldValue.serverTimestamp()
         )
         val docRef = firestore.collection("app_configs").document("google_drive")
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.GOOGLE_DRIVE.versionKey)
@@ -701,7 +736,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing google drive config", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "app_configs/google_drive")
         false
     }
 
@@ -714,7 +749,7 @@ internal object AdminCloudPublisher {
         notifyTypedFn: (suspend (String, String, String, String, String, String, String) -> Boolean)? = null
     ): Boolean = try {
         val docRef = firestore.collection("news_articles").document(getNewsDocId(news))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "title" to news.title,
             "summary" to news.summary,
             "content" to news.content,
@@ -727,7 +762,7 @@ internal object AdminCloudPublisher {
             "pinOrder" to news.pinOrder,
             "isBreaking" to news.isBreaking,
             "isVisible" to news.isVisible,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.NEWS.versionKey)
         if (sendNotification) {
@@ -741,15 +776,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing news", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "news_articles/${getNewsDocId(news)}")
         false
     }
 
     suspend fun deleteNewsFromCloud(firestore: FirebaseFirestore, news: NewsArticleEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("news_articles").document(getNewsDocId(news)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("news_articles").document(getNewsDocId(news)))
         val matches = firestore.collection("news_articles").whereEqualTo("title", news.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.NEWS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -758,7 +797,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting news", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "news_articles/${getNewsDocId(news)}")
         false
     }
 
@@ -771,11 +810,12 @@ internal object AdminCloudPublisher {
     ): Boolean = try {
         val batch = firestore.batch()
         for (box in boxes) {
-            val docRef = firestore.collection("feature_boxes").document(box.id)
+            val safeId = sanitizeDocId(box.id, "feature_${box.displayOrder}")
+            val docRef = firestore.collection("feature_boxes").document(safeId)
             batch.set(
                 docRef,
-                hashMapOf(
-                    "id" to box.id,
+                hashMapOf<String, Any>(
+                    "id" to safeId,
                     "title" to box.title,
                     "subtitle" to box.subtitle,
                     "iconType" to box.iconType,
@@ -784,7 +824,7 @@ internal object AdminCloudPublisher {
                     "isVisible" to box.isVisible,
                     "isExternal" to box.isExternal,
                     "externalUrl" to box.externalUrl,
-                    "timestamp" to Timestamp.now()
+                    "timestamp" to FieldValue.serverTimestamp()
                 )
             )
         }
@@ -799,13 +839,14 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing feature boxes", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "feature_boxes")
         false
     }
 
     suspend fun deleteFeatureBoxFromCloud(firestore: FirebaseFirestore, box: FeatureBoxEntity): Boolean = try {
+        val safeId = sanitizeDocId(box.id, "feature_${box.displayOrder}")
         val batch = firestore.batch()
-        batch.delete(firestore.collection("feature_boxes").document(box.id))
+        batch.delete(firestore.collection("feature_boxes").document(safeId))
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.FEATURE_BOXES.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -814,7 +855,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting feature box", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "feature_boxes/${box.id}")
         false
     }
 
@@ -824,7 +865,7 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "link1Title" to links.link1Title,
             "link1Url" to links.link1Url,
             "link1Visible" to links.link1Visible,
@@ -834,7 +875,7 @@ internal object AdminCloudPublisher {
             "link3Title" to links.link3Title,
             "link3Url" to links.link3Url,
             "link3Visible" to links.link3Visible,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(
             firestore,
@@ -847,7 +888,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing top three links", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "app_config/top_three_links")
         false
     }
 
@@ -857,7 +898,7 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "heading" to banner.heading,
             "supportingText" to banner.supportingText,
             "disclaimer" to banner.disclaimer,
@@ -866,7 +907,7 @@ internal object AdminCloudPublisher {
             "destinationUrl" to banner.destinationUrl,
             "imageUrl" to banner.imageUrl,
             "isVisible" to banner.isVisible,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(
             firestore,
@@ -879,7 +920,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing financial banner", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "app_config/financial_banner")
         false
     }
 
@@ -889,13 +930,13 @@ internal object AdminCloudPublisher {
         notifyFn: suspend (String, String, String) -> Boolean,
         sendNotification: Boolean
     ): Boolean = try {
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "bannerText" to banner.bannerText,
             "buttonText" to banner.buttonText,
             "channelUrl" to banner.channelUrl,
             "imageUrl" to banner.imageUrl,
             "isVisible" to banner.isVisible,
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(
             firestore,
@@ -908,7 +949,7 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing whatsapp banner", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "app_config/whatsapp_banner")
         false
     }
 
@@ -920,14 +961,14 @@ internal object AdminCloudPublisher {
         sendNotification: Boolean
     ): Boolean = try {
         val docRef = firestore.collection("home_top_links").document(getHomeTopLinkDocId(link))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to link.id,
             "title" to link.title,
             "url" to link.url,
             "isVisible" to link.isVisible,
             "displayOrder" to link.displayOrder,
             "lastUpdated" to System.currentTimeMillis(),
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.HOME_TOP_LINKS.versionKey)
         if (sendNotification) {
@@ -935,15 +976,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing home top link", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "home_top_links/${getHomeTopLinkDocId(link)}")
         false
     }
 
     suspend fun deleteHomeTopLinkFromCloud(firestore: FirebaseFirestore, link: HomeTopLinkEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("home_top_links").document(getHomeTopLinkDocId(link)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("home_top_links").document(getHomeTopLinkDocId(link)))
         val matches = firestore.collection("home_top_links").whereEqualTo("title", link.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.HOME_TOP_LINKS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -952,7 +997,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting home top link", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "home_top_links/${getHomeTopLinkDocId(link)}")
         false
     }
 
@@ -963,7 +1008,7 @@ internal object AdminCloudPublisher {
         sendNotification: Boolean
     ): Boolean = try {
         val docRef = firestore.collection("complaint_options").document(getComplaintDocId(option))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to option.id,
             "title" to option.title,
             "description" to option.description,
@@ -973,7 +1018,7 @@ internal object AdminCloudPublisher {
             "isVisible" to option.isVisible,
             "displayOrder" to option.displayOrder,
             "lastUpdated" to System.currentTimeMillis(),
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.COMPLAINT_OPTIONS.versionKey)
         if (sendNotification) {
@@ -981,15 +1026,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing complaint option", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "complaint_options/${getComplaintDocId(option)}")
         false
     }
 
     suspend fun deleteComplaintOptionFromCloud(firestore: FirebaseFirestore, option: ComplaintOptionEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("complaint_options").document(getComplaintDocId(option)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("complaint_options").document(getComplaintDocId(option)))
         val matches = firestore.collection("complaint_options").whereEqualTo("title", option.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.COMPLAINT_OPTIONS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -998,7 +1047,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting complaint option", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "complaint_options/${getComplaintDocId(option)}")
         false
     }
 
@@ -1009,7 +1058,7 @@ internal object AdminCloudPublisher {
         sendNotification: Boolean
     ): Boolean = try {
         val docRef = firestore.collection("financial_services").document(getFinancialServiceDocId(service))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to service.id,
             "category" to service.category,
             "title" to service.title,
@@ -1020,7 +1069,7 @@ internal object AdminCloudPublisher {
             "isVisible" to service.isVisible,
             "displayOrder" to service.displayOrder,
             "lastUpdated" to System.currentTimeMillis(),
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.FINANCIAL_SERVICES.versionKey)
         if (sendNotification) {
@@ -1033,15 +1082,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing financial service", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "financial_services/${getFinancialServiceDocId(service)}")
         false
     }
 
     suspend fun deleteFinancialServiceFromCloud(firestore: FirebaseFirestore, service: FinancialServiceEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("financial_services").document(getFinancialServiceDocId(service)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("financial_services").document(getFinancialServiceDocId(service)))
         val matches = firestore.collection("financial_services").whereEqualTo("title", service.title).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.FINANCIAL_SERVICES.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -1050,7 +1103,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting financial service", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "financial_services/${getFinancialServiceDocId(service)}")
         false
     }
 
@@ -1061,14 +1114,14 @@ internal object AdminCloudPublisher {
         isNew: Boolean
     ): Boolean = try {
         val docRef = firestore.collection("youtube_feeds").document(getYouTubeFeedDocId(feed))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to feed.id,
             "channelTitle" to feed.channelTitle,
             "feedUrl" to feed.feedUrl,
             "channelId" to feed.channelId,
             "isVisible" to feed.isVisible,
             "lastUpdated" to System.currentTimeMillis(),
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.YOUTUBE_FEEDS.versionKey)
         if (isNew) {
@@ -1076,15 +1129,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing youtube feed", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "youtube_feeds/${getYouTubeFeedDocId(feed)}")
         false
     }
 
     suspend fun deleteYouTubeFeedFromCloud(firestore: FirebaseFirestore, feed: YouTubeFeedEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("youtube_feeds").document(getYouTubeFeedDocId(feed)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("youtube_feeds").document(getYouTubeFeedDocId(feed)))
         val matches = firestore.collection("youtube_feeds").whereEqualTo("feedUrl", feed.feedUrl).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.YOUTUBE_FEEDS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -1093,7 +1150,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting youtube feed", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "youtube_feeds/${getYouTubeFeedDocId(feed)}")
         false
     }
 
@@ -1104,13 +1161,13 @@ internal object AdminCloudPublisher {
         isNew: Boolean
     ): Boolean = try {
         val docRef = firestore.collection("news_rss_feeds").document(getNewsRssDocId(feed))
-        val data = hashMapOf(
+        val data = hashMapOf<String, Any>(
             "id" to feed.id,
             "title" to feed.title,
             "feedUrl" to feed.feedUrl,
             "isVisible" to feed.isVisible,
             "lastUpdated" to System.currentTimeMillis(),
-            "timestamp" to Timestamp.now()
+            "timestamp" to FieldValue.serverTimestamp()
         )
         commitSingleDocWithVersionBump(firestore, docRef, data, CloudSection.NEWS_RSS_FEEDS.versionKey)
         if (isNew) {
@@ -1118,15 +1175,19 @@ internal object AdminCloudPublisher {
         }
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error publishing news rss feed", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "news_rss_feeds/${getNewsRssDocId(feed)}")
         false
     }
 
     suspend fun deleteNewsRssFeedFromCloud(firestore: FirebaseFirestore, feed: NewsRssFeedEntity): Boolean = try {
         val batch = firestore.batch()
-        batch.delete(firestore.collection("news_rss_feeds").document(getNewsRssDocId(feed)))
+        val deletedIds = mutableSetOf<String>()
+        fun addDelete(ref: DocumentReference) {
+            if (isSafeDocId(ref.id) && deletedIds.add(ref.id)) batch.delete(ref)
+        }
+        addDelete(firestore.collection("news_rss_feeds").document(getNewsRssDocId(feed)))
         val matches = firestore.collection("news_rss_feeds").whereEqualTo("feedUrl", feed.feedUrl).get().await()
-        matches.documents.forEach { batch.delete(it.reference) }
+        matches.documents.forEach { addDelete(it.reference) }
         batch.set(
             versionsDoc(firestore),
             mapOf(CloudSection.NEWS_RSS_FEEDS.versionKey to FieldValue.increment(1), "updatedAt" to FieldValue.serverTimestamp()),
@@ -1135,7 +1196,7 @@ internal object AdminCloudPublisher {
         batch.commit().await()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Error deleting news rss feed", e)
+        FirestoreErrorHandler.handleFirestoreError(e, OperationType.DELETE, "news_rss_feeds/${getNewsRssDocId(feed)}")
         false
     }
 
@@ -1154,7 +1215,7 @@ internal object AdminCloudPublisher {
             val ops = mutableListOf<Pair<DocumentReference, Map<String, Any>>>()
             val changedSections = mutableSetOf<String>()
             val sigEdits = mutableMapOf<String, Int>()
-            val now = Timestamp.now()
+            val serverNow = FieldValue.serverTimestamp()
 
             fun checkAndQueue(section: CloudSection, signature: Int, builder: () -> List<Pair<DocumentReference, Map<String, Any>>>) {
                 val prefKey = PREF_PUSH_SIG_PREFIX + section.versionKey
@@ -1169,50 +1230,55 @@ internal object AdminCloudPublisher {
                 }
             }
 
-            val notices = repository.allNoticesOnce()
+            val notices = repository.allNoticesOnce().filter { it.title.isNotBlank() }
             checkAndQueue(CloudSection.NOTICES, notices.map { listOf(it.title, it.summary, it.category, it.issueDate, it.orderNumber, it.officialUrl, it.pdfUrl, it.imageUrl, it.isFeatured) }.hashCode()) {
                 notices.map { n ->
-                    firestore.collection("notices").document(getNoticeDocId(n)) to hashMapOf(
-                        "title" to n.title, "summary" to n.summary, "category" to n.category,
-                        "issueDate" to n.issueDate, "department" to n.department, "orderNumber" to n.orderNumber,
-                        "officialUrl" to n.officialUrl, "pdfUrl" to n.pdfUrl, "imageUrl" to n.imageUrl,
-                        "isFeatured" to n.isFeatured, "isPublished" to true, "timestamp" to now
+                    firestore.collection("notices").document(getNoticeDocId(n)) to hashMapOf<String, Any>(
+                        "title" to n.title.take(500), "summary" to n.summary.take(4000),
+                        "category" to n.category.ifBlank { "सरकारी आदेश" }.take(120),
+                        "issueDate" to n.issueDate.take(64), "department" to n.department.take(300),
+                        "orderNumber" to n.orderNumber.take(120),
+                        "officialUrl" to n.officialUrl.take(1000), "pdfUrl" to n.pdfUrl.take(1000),
+                        "imageUrl" to n.imageUrl.take(1000),
+                        "isFeatured" to n.isFeatured, "isPublished" to true, "timestamp" to serverNow
                     )
                 }
             }
 
-            val holidays = repository.allHolidaysOnce()
+            val holidays = repository.allHolidaysOnce().filter { it.name.isNotBlank() }
             checkAndQueue(CloudSection.HOLIDAYS, holidays.map { listOf(it.name, it.dateStr, it.dayOfWeek, it.month, it.type, it.durationDays, it.description) }.hashCode()) {
                 holidays.map { h ->
-                    firestore.collection("holiday_calendars").document(getHolidayDocId(h)) to hashMapOf(
-                        "name" to h.name, "dateStr" to h.dateStr, "dayOfWeek" to h.dayOfWeek,
-                        "month" to h.month, "type" to h.type, "durationDays" to h.durationDays,
-                        "description" to h.description, "timestamp" to now
+                    firestore.collection("holiday_calendars").document(getHolidayDocId(h)) to hashMapOf<String, Any>(
+                        "name" to h.name.take(300), "dateStr" to h.dateStr.take(64), "dayOfWeek" to h.dayOfWeek.take(64),
+                        "month" to h.month.coerceIn(1, 12), "type" to h.type.ifBlank { "अवकाश" }.take(120),
+                        "durationDays" to h.durationDays.coerceIn(1, 366),
+                        "description" to h.description.take(1000), "timestamp" to serverNow
                     )
                 }
             }
 
-            val activities = repository.allActivitiesOnce()
+            val activities = repository.allActivitiesOnce().filter { it.title.isNotBlank() }
             checkAndQueue(CloudSection.ACTIVITIES, activities.map { listOf(it.title, it.description, it.category, it.linkUrl, it.orderNumber) }.hashCode()) {
                 activities.map { a ->
-                    firestore.collection("activities").document(getActivityDocId(a)) to hashMapOf(
-                        "title" to a.title, "description" to a.description, "category" to a.category,
-                        "linkUrl" to a.linkUrl, "orderNumber" to a.orderNumber, "timestamp" to now
+                    firestore.collection("activities").document(getActivityDocId(a)) to hashMapOf<String, Any>(
+                        "title" to a.title.take(300), "description" to a.description.take(2000),
+                        "category" to a.category.ifBlank { "गतिविधि" }.take(120),
+                        "linkUrl" to a.linkUrl.take(1000), "orderNumber" to a.orderNumber.take(120), "timestamp" to serverNow
                     )
                 }
             }
 
-            val portals = repository.allPortalsOnce()
+            val portals = repository.allPortalsOnce().filter { it.title.isNotBlank() }
             checkAndQueue(CloudSection.PORTALS, portals.map { listOf(it.title, it.subtitle, it.url, it.badge, it.colorHex) }.hashCode()) {
                 portals.map { p ->
-                    firestore.collection("quick_portals").document(getPortalDocId(p)) to hashMapOf(
-                        "title" to p.title, "subtitle" to p.subtitle, "url" to p.url,
-                        "badge" to p.badge, "colorHex" to p.colorHex, "timestamp" to now
+                    firestore.collection("quick_portals").document(getPortalDocId(p)) to hashMapOf<String, Any>(
+                        "title" to p.title.take(200), "subtitle" to p.subtitle.take(300), "url" to p.url.take(1000),
+                        "badge" to p.badge.take(64), "colorHex" to p.colorHex.take(32), "timestamp" to serverNow
                     )
                 }
             }
 
-            val rawDownloads = repository.allDownloadsOnce()
+            val rawDownloads = repository.allDownloadsOnce().filter { it.title.isNotBlank() }
             val dedupedDownloads = com.example.core.DownloadSyncHelper.deduplicate(rawDownloads).map { d ->
                 val cid = d.cloudId.ifBlank { com.example.core.DownloadSyncHelper.resolveCanonicalDocId(d) }
                 if (d.cloudId.isBlank() && d.id > 0L) {
@@ -1225,49 +1291,69 @@ internal object AdminCloudPublisher {
             }
             checkAndQueue(CloudSection.DOWNLOADS, dedupedDownloads.map { listOf(it.cloudId, it.title, it.category, it.fileSize, it.pdfUrl, it.publicationDate, it.orderNumber, it.fileType, it.isVisible) }.hashCode()) {
                 dedupedDownloads.map { d ->
-                    firestore.collection("download_resources").document(getDownloadDocId(d)) to hashMapOf(
-                        "cloudId" to d.cloudId,
-                        "title" to d.title, "category" to d.category, "fileSize" to d.fileSize,
-                        "pdfUrl" to d.pdfUrl, "publicationDate" to d.publicationDate, "orderNumber" to d.orderNumber,
-                        "description" to d.description, "fileType" to d.fileType, "isVisible" to d.isVisible, "publishedAt" to now
+                    firestore.collection("download_resources").document(getDownloadDocId(d)) to hashMapOf<String, Any>(
+                        "cloudId" to d.cloudId.take(128),
+                        "title" to d.title.take(500), "category" to d.category.ifBlank { "प्रपत्र" }.take(120),
+                        "fileSize" to d.fileSize.take(64),
+                        "pdfUrl" to d.pdfUrl.take(1000), "publicationDate" to d.publicationDate.take(64),
+                        "orderNumber" to d.orderNumber.take(120),
+                        "description" to d.description.take(2000), "fileType" to d.fileType.take(32),
+                        "isVisible" to d.isVisible, "publishedAt" to serverNow
                     )
                 }
             }
 
-            val videos = repository.allVideosOnce().filter { it.isPinned || it.isFeaturedOnHome }
+            val videos = repository.allVideosOnce().filter { it.title.isNotBlank() && (it.duration != "यूट्यूब" || it.isPinned || it.isFeaturedOnHome) }
             checkAndQueue(CloudSection.VIDEOS, videos.map { listOf(it.title, it.youtubeUrl, it.youtubeId, it.isPinned, it.isFeaturedOnHome, it.displayOrder) }.hashCode()) {
                 videos.map { v ->
                     val thumb = if (v.thumbnailUrl.isNotBlank()) v.thumbnailUrl else YouTubeUrlHelper.getThumbnailUrl(v.youtubeId)
-                    firestore.collection("video_tutorials").document(getVideoDocId(v)) to hashMapOf(
-                        "id" to v.id, "title" to v.title, "category" to v.category,
-                        "youtubeUrl" to v.youtubeUrl, "youtubeId" to v.youtubeId, "thumbnailUrl" to thumb,
-                        "duration" to v.duration, "description" to v.description,
+                    firestore.collection("video_tutorials").document(getVideoDocId(v)) to hashMapOf<String, Any>(
+                        "id" to v.id, "title" to v.title.take(400), "category" to v.category.take(120),
+                        "youtubeUrl" to v.youtubeUrl.take(1000), "youtubeId" to v.youtubeId.take(128), "thumbnailUrl" to thumb.take(1000),
+                        "duration" to v.duration.take(64), "description" to v.description.take(2000),
                         "isPinned" to v.isPinned, "isFeaturedOnHome" to v.isFeaturedOnHome,
-                        "displayOrder" to v.displayOrder, "publishedAt" to now
+                        "displayOrder" to v.displayOrder, "publishedAt" to serverNow
                     )
                 }
             }
 
-            val news = repository.allNewsOnce().filter { it.isPinned || it.isBreaking || it.source.contains("Admin") || it.source.contains("एडमिन") }
-            checkAndQueue(CloudSection.NEWS, news.map { listOf(it.title, it.summary, it.isPinned, it.pinOrder, it.isBreaking, it.isVisible) }.hashCode()) {
+            val news = repository.allNewsOnce().filter {
+                it.title.isNotBlank() && (it.category != "लाइव RSS" || it.isPinned || it.isBreaking || it.source.contains("Admin") || it.source.contains("एडमिन"))
+            }
+            checkAndQueue(CloudSection.NEWS, news.map { listOf(it.title, it.summary, it.imageUrl, it.isPinned, it.pinOrder, it.isBreaking, it.isVisible) }.hashCode()) {
                 news.map { n ->
-                    firestore.collection("news_articles").document(getNewsDocId(n)) to hashMapOf(
-                        "title" to n.title, "summary" to n.summary, "content" to n.content,
-                        "category" to n.category, "publishedAt" to n.publishedAt, "source" to n.source,
-                        "sourceUrl" to n.sourceUrl, "imageUrl" to n.imageUrl,
+                    firestore.collection("news_articles").document(getNewsDocId(n)) to hashMapOf<String, Any>(
+                        "title" to n.title.take(500), "summary" to n.summary.take(2000), "content" to n.content.take(15000),
+                        "category" to n.category.ifBlank { "शिक्षा समाचार" }.take(120), "publishedAt" to n.publishedAt.take(120),
+                        "source" to n.source.take(200), "sourceUrl" to n.sourceUrl.take(1000), "imageUrl" to n.imageUrl.take(1000),
                         "isPinned" to n.isPinned, "pinOrder" to n.pinOrder, "isBreaking" to n.isBreaking,
-                        "isVisible" to n.isVisible, "timestamp" to now
+                        "isVisible" to n.isVisible, "timestamp" to serverNow
                     )
+                }
+            }
+
+            val banners = repository.allBannersOnce()
+            if (banners.isNotEmpty()) {
+                checkAndQueue(CloudSection.BANNERS, banners.map { listOf(it.bannerId, it.title, it.description, it.imageUrl, it.destinationUrl, it.orderIndex, it.isActive) }.hashCode()) {
+                    banners.map { b ->
+                        val docId = resolveBannerDocId(b)
+                        firestore.collection("promo_banners").document(docId) to hashMapOf<String, Any>(
+                            "bannerId" to docId, "title" to b.title.ifBlank { "बैनर" }, "description" to b.description,
+                            "category" to b.category, "imageUrl" to b.imageUrl, "destinationUrl" to b.destinationUrl,
+                            "buttonText" to b.buttonText, "orderIndex" to b.orderIndex, "isActive" to b.isActive,
+                            "publishedAt" to serverNow
+                        )
+                    }
                 }
             }
 
             val topLinks = repository.getAllHomeTopLinksOnce()
             checkAndQueue(CloudSection.HOME_TOP_LINKS, topLinks.map { listOf(it.id, it.title, it.url, it.isVisible, it.displayOrder) }.hashCode()) {
                 topLinks.map { link ->
-                    firestore.collection("home_top_links").document(getHomeTopLinkDocId(link)) to hashMapOf(
+                    firestore.collection("home_top_links").document(getHomeTopLinkDocId(link)) to hashMapOf<String, Any>(
                         "id" to link.id, "title" to link.title, "url" to link.url,
                         "isVisible" to link.isVisible, "displayOrder" to link.displayOrder,
-                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                     )
                 }
             }
@@ -1275,11 +1361,11 @@ internal object AdminCloudPublisher {
             val complaints = repository.getAllComplaintOptionsOnce()
             checkAndQueue(CloudSection.COMPLAINT_OPTIONS, complaints.map { listOf(it.id, it.title, it.phone, it.email, it.linkUrl, it.isVisible, it.displayOrder) }.hashCode()) {
                 complaints.map { c ->
-                    firestore.collection("complaint_options").document(getComplaintDocId(c)) to hashMapOf(
+                    firestore.collection("complaint_options").document(getComplaintDocId(c)) to hashMapOf<String, Any>(
                         "id" to c.id, "title" to c.title, "description" to c.description,
                         "phone" to c.phone, "email" to c.email, "linkUrl" to c.linkUrl,
                         "isVisible" to c.isVisible, "displayOrder" to c.displayOrder,
-                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                     )
                 }
             }
@@ -1287,11 +1373,11 @@ internal object AdminCloudPublisher {
             val financial = repository.getAllFinancialServicesOnce()
             checkAndQueue(CloudSection.FINANCIAL_SERVICES, financial.map { listOf(it.id, it.category, it.title, it.applyUrl, it.isVisible, it.displayOrder) }.hashCode()) {
                 financial.map { f ->
-                    firestore.collection("financial_services").document(getFinancialServiceDocId(f)) to hashMapOf(
+                    firestore.collection("financial_services").document(getFinancialServiceDocId(f)) to hashMapOf<String, Any>(
                         "id" to f.id, "category" to f.category, "title" to f.title,
                         "description" to f.description, "applyUrl" to f.applyUrl, "isGoogleForm" to f.isGoogleForm,
                         "buttonText" to f.buttonText, "isVisible" to f.isVisible, "displayOrder" to f.displayOrder,
-                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                        "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                     )
                 }
             }
@@ -1300,11 +1386,38 @@ internal object AdminCloudPublisher {
             if (boxes.isNotEmpty()) {
                 checkAndQueue(CloudSection.FEATURE_BOXES, boxes.map { listOf(it.id, it.title, it.subtitle, it.displayOrder, it.isVisible, it.externalUrl) }.hashCode()) {
                     boxes.map { b ->
-                        firestore.collection("feature_boxes").document(b.id) to hashMapOf(
-                            "id" to b.id, "title" to b.title, "subtitle" to b.subtitle,
+                        val safeBoxId = sanitizeDocId(b.id, "feature_${b.displayOrder}")
+                        firestore.collection("feature_boxes").document(safeBoxId) to hashMapOf<String, Any>(
+                            "id" to safeBoxId, "title" to b.title, "subtitle" to b.subtitle,
                             "iconType" to b.iconType, "destinationRoute" to b.destinationRoute,
                             "displayOrder" to b.displayOrder, "isVisible" to b.isVisible,
-                            "isExternal" to b.isExternal, "externalUrl" to b.externalUrl, "timestamp" to now
+                            "isExternal" to b.isExternal, "externalUrl" to b.externalUrl, "timestamp" to serverNow
+                        )
+                    }
+                }
+            }
+
+            val ytFeeds = repository.getAllYouTubeFeedsOnce().filter { it.channelTitle.isNotBlank() && it.feedUrl.isNotBlank() }
+            if (ytFeeds.isNotEmpty()) {
+                checkAndQueue(CloudSection.YOUTUBE_FEEDS, ytFeeds.map { listOf(it.id, it.channelTitle, it.feedUrl, it.channelId, it.isVisible) }.hashCode()) {
+                    ytFeeds.map { f ->
+                        firestore.collection("youtube_feeds").document(getYouTubeFeedDocId(f)) to hashMapOf<String, Any>(
+                            "id" to f.id, "channelTitle" to f.channelTitle, "feedUrl" to f.feedUrl,
+                            "channelId" to f.channelId, "isVisible" to f.isVisible,
+                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
+                        )
+                    }
+                }
+            }
+
+            val newsFeeds = repository.getAllNewsRssFeedsOnce().filter { it.title.isNotBlank() && it.feedUrl.isNotBlank() }
+            if (newsFeeds.isNotEmpty()) {
+                checkAndQueue(CloudSection.NEWS_RSS_FEEDS, newsFeeds.map { listOf(it.id, it.title, it.feedUrl, it.isVisible) }.hashCode()) {
+                    newsFeeds.map { f ->
+                        firestore.collection("news_rss_feeds").document(getNewsRssDocId(f)) to hashMapOf<String, Any>(
+                            "id" to f.id, "title" to f.title, "feedUrl" to f.feedUrl,
+                            "isVisible" to f.isVisible, "lastUpdated" to System.currentTimeMillis(),
+                            "timestamp" to serverNow
                         )
                     }
                 }
@@ -1313,9 +1426,31 @@ internal object AdminCloudPublisher {
             repository.getSchoolTimingOnce()?.let { t ->
                 checkAndQueue(CloudSection.SCHOOL_TIMING, listOf(t.openingTime, t.closingTime, t.isManuallyClosed, t.closureReason).hashCode()) {
                     listOf(
-                        firestore.collection("school_config").document("timings") to hashMapOf(
+                        firestore.collection("school_config").document("timings") to hashMapOf<String, Any>(
                             "openingTime" to t.openingTime, "closingTime" to t.closingTime,
-                            "isManuallyClosed" to t.isManuallyClosed, "closureReason" to t.closureReason, "updatedAt" to now
+                            "isManuallyClosed" to t.isManuallyClosed, "closureReason" to t.closureReason, "updatedAt" to serverNow
+                        )
+                    )
+                }
+            }
+
+            repository.getWhatsAppDataOnce()?.let { wa ->
+                checkAndQueue(CloudSection.WHATSAPP_CONFIG, listOf(wa.channelUrl, wa.channelTitle, wa.districtGroupsUrl, wa.districtGroupsTitle).hashCode()) {
+                    listOf(
+                        firestore.collection("whatsapp_config").document("main") to hashMapOf<String, Any>(
+                            "channelUrl" to wa.channelUrl, "channelTitle" to wa.channelTitle.ifBlank { "शिक्षक साथी चैनल" },
+                            "districtGroupsUrl" to wa.districtGroupsUrl, "districtGroupsTitle" to wa.districtGroupsTitle,
+                            "updatedAt" to serverNow
+                        )
+                    )
+                }
+            }
+
+            repository.getGoogleDriveConfigOnce()?.let { gd ->
+                checkAndQueue(CloudSection.GOOGLE_DRIVE, listOf(gd.isEnabled, gd.folderUrl).hashCode()) {
+                    listOf(
+                        firestore.collection("app_configs").document("google_drive") to hashMapOf<String, Any>(
+                            "isEnabled" to gd.isEnabled, "folderUrl" to gd.folderUrl, "updatedAt" to serverNow
                         )
                     )
                 }
@@ -1324,34 +1459,34 @@ internal object AdminCloudPublisher {
             repository.getTopThreeLinksOnce()?.let { l ->
                 checkAndQueue(CloudSection.TOP_THREE_LINKS, listOf(l.link1Title, l.link1Url, l.link1Visible, l.link2Title, l.link2Url, l.link2Visible, l.link3Title, l.link3Url, l.link3Visible).hashCode()) {
                     listOf(
-                        firestore.collection("app_config").document("top_three_links") to hashMapOf(
+                        firestore.collection("app_config").document("top_three_links") to hashMapOf<String, Any>(
                             "link1Title" to l.link1Title, "link1Url" to l.link1Url, "link1Visible" to l.link1Visible,
                             "link2Title" to l.link2Title, "link2Url" to l.link2Url, "link2Visible" to l.link2Visible,
                             "link3Title" to l.link3Title, "link3Url" to l.link3Url, "link3Visible" to l.link3Visible,
-                            "timestamp" to now
+                            "timestamp" to serverNow
                         )
                     )
                 }
             }
 
             repository.getFinancialBannerOnce()?.let { fb ->
-                checkAndQueue(CloudSection.FINANCIAL_BANNER, listOf(fb.heading, fb.supportingText, fb.buttonText, fb.destinationUrl, fb.isVisible).hashCode()) {
+                checkAndQueue(CloudSection.FINANCIAL_BANNER, listOf(fb.heading, fb.supportingText, fb.buttonText, fb.destinationUrl, fb.imageUrl, fb.isVisible).hashCode()) {
                     listOf(
-                        firestore.collection("app_config").document("financial_banner") to hashMapOf(
+                        firestore.collection("app_config").document("financial_banner") to hashMapOf<String, Any>(
                             "heading" to fb.heading, "supportingText" to fb.supportingText, "disclaimer" to fb.disclaimer,
                             "buttonText" to fb.buttonText, "destinationType" to fb.destinationType,
-                            "destinationUrl" to fb.destinationUrl, "imageUrl" to fb.imageUrl, "isVisible" to fb.isVisible, "timestamp" to now
+                            "destinationUrl" to fb.destinationUrl, "imageUrl" to fb.imageUrl, "isVisible" to fb.isVisible, "timestamp" to serverNow
                         )
                     )
                 }
             }
 
             repository.getWhatsAppBannerOnce()?.let { wb ->
-                checkAndQueue(CloudSection.WHATSAPP_BANNER, listOf(wb.bannerText, wb.buttonText, wb.channelUrl, wb.isVisible).hashCode()) {
+                checkAndQueue(CloudSection.WHATSAPP_BANNER, listOf(wb.bannerText, wb.buttonText, wb.channelUrl, wb.imageUrl, wb.isVisible).hashCode()) {
                     listOf(
-                        firestore.collection("app_config").document("whatsapp_banner") to hashMapOf(
+                        firestore.collection("app_config").document("whatsapp_banner") to hashMapOf<String, Any>(
                             "bannerText" to wb.bannerText, "buttonText" to wb.buttonText, "channelUrl" to wb.channelUrl,
-                            "imageUrl" to wb.imageUrl, "isVisible" to wb.isVisible, "timestamp" to now
+                            "imageUrl" to wb.imageUrl, "isVisible" to wb.isVisible, "timestamp" to serverNow
                         )
                     )
                 }
@@ -1360,9 +1495,9 @@ internal object AdminCloudPublisher {
             val currentDa = repository.getCurrentDaPercent()
             checkAndQueue(CloudSection.SALARY_RULES, currentDa.hashCode()) {
                 listOf(
-                    firestore.collection("salary_rules").document("current") to hashMapOf(
+                    firestore.collection("salary_rules").document("current") to hashMapOf<String, Any>(
                         "daPercent" to currentDa, "ruralHra" to 8.0, "urbanHra" to 16.0,
-                        "effectiveDate" to "01/11/2026", "publishedAt" to now
+                        "effectiveDate" to "01/11/2026", "publishedAt" to serverNow
                     )
                 )
             }
@@ -1394,7 +1529,7 @@ internal object AdminCloudPublisher {
             }
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Error in smart syncAllLocalDataToCloud", e)
+            FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "batch_sync")
             false
         }
     }
@@ -1409,16 +1544,16 @@ internal object AdminCloudPublisher {
         try {
             val batch = firestore.batch()
             var opsCount = 0
-            val now = Timestamp.now()
+            val serverNow = FieldValue.serverTimestamp()
 
             if (!firestore.collection("school_config").document("timings").get().await().exists()) {
                 val localTiming = repository.getSchoolTimingOnce() ?: SchoolTimingEntity()
                 batch.set(
                     firestore.collection("school_config").document("timings"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "openingTime" to localTiming.openingTime, "closingTime" to localTiming.closingTime,
                         "isManuallyClosed" to localTiming.isManuallyClosed, "closureReason" to localTiming.closureReason,
-                        "updatedAt" to now
+                        "updatedAt" to serverNow
                     )
                 )
                 opsCount++
@@ -1428,9 +1563,9 @@ internal object AdminCloudPublisher {
                 val currentDa = repository.getCurrentDaPercent()
                 batch.set(
                     firestore.collection("salary_rules").document("current"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "daPercent" to currentDa, "ruralHra" to 8.0, "urbanHra" to 16.0,
-                        "effectiveDate" to "01/11/2026", "publishedAt" to now
+                        "effectiveDate" to "01/11/2026", "publishedAt" to serverNow
                     )
                 )
                 opsCount++
@@ -1439,13 +1574,14 @@ internal object AdminCloudPublisher {
             if (firestore.collection("feature_boxes").limit(1).get().await().isEmpty) {
                 val localBoxes = repository.getAllFeatureBoxesOnce().ifEmpty { DEFAULT_FEATURE_BOXES }
                 for (box in localBoxes) {
+                    val safeBoxId = sanitizeDocId(box.id, "feature_${box.displayOrder}")
                     batch.set(
-                        firestore.collection("feature_boxes").document(box.id),
-                        hashMapOf(
-                            "id" to box.id, "title" to box.title, "subtitle" to box.subtitle,
+                        firestore.collection("feature_boxes").document(safeBoxId),
+                        hashMapOf<String, Any>(
+                            "id" to safeBoxId, "title" to box.title, "subtitle" to box.subtitle,
                             "iconType" to box.iconType, "destinationRoute" to box.destinationRoute,
                             "displayOrder" to box.displayOrder, "isVisible" to box.isVisible,
-                            "isExternal" to box.isExternal, "externalUrl" to box.externalUrl, "timestamp" to now
+                            "isExternal" to box.isExternal, "externalUrl" to box.externalUrl, "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1457,10 +1593,10 @@ internal object AdminCloudPublisher {
                 for (link in localLinks) {
                     batch.set(
                         firestore.collection("home_top_links").document(getHomeTopLinkDocId(link)),
-                        hashMapOf(
+                        hashMapOf<String, Any>(
                             "id" to link.id, "title" to link.title, "url" to link.url,
                             "isVisible" to link.isVisible, "displayOrder" to link.displayOrder,
-                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1472,11 +1608,11 @@ internal object AdminCloudPublisher {
                 for (c in localComps) {
                     batch.set(
                         firestore.collection("complaint_options").document(getComplaintDocId(c)),
-                        hashMapOf(
+                        hashMapOf<String, Any>(
                             "id" to c.id, "title" to c.title, "description" to c.description,
                             "phone" to c.phone, "email" to c.email, "linkUrl" to c.linkUrl,
                             "isVisible" to c.isVisible, "displayOrder" to c.displayOrder,
-                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1488,11 +1624,11 @@ internal object AdminCloudPublisher {
                 for (s in localFin) {
                     batch.set(
                         firestore.collection("financial_services").document(getFinancialServiceDocId(s)),
-                        hashMapOf(
+                        hashMapOf<String, Any>(
                             "id" to s.id, "category" to s.category, "title" to s.title,
                             "description" to s.description, "applyUrl" to s.applyUrl, "isGoogleForm" to s.isGoogleForm,
                             "buttonText" to s.buttonText, "isVisible" to s.isVisible, "displayOrder" to s.displayOrder,
-                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1504,10 +1640,10 @@ internal object AdminCloudPublisher {
                 for (f in feeds) {
                     batch.set(
                         firestore.collection("youtube_feeds").document(getYouTubeFeedDocId(f)),
-                        hashMapOf(
+                        hashMapOf<String, Any>(
                             "id" to f.id, "channelTitle" to f.channelTitle, "channelId" to f.channelId,
                             "feedUrl" to f.feedUrl, "isVisible" to f.isVisible,
-                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                            "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1519,9 +1655,9 @@ internal object AdminCloudPublisher {
                 for (f in rss) {
                     batch.set(
                         firestore.collection("news_rss_feeds").document(getNewsRssDocId(f)),
-                        hashMapOf(
+                        hashMapOf<String, Any>(
                             "id" to f.id, "title" to f.title, "feedUrl" to f.feedUrl,
-                            "isVisible" to f.isVisible, "lastUpdated" to System.currentTimeMillis(), "timestamp" to now
+                            "isVisible" to f.isVisible, "lastUpdated" to System.currentTimeMillis(), "timestamp" to serverNow
                         )
                     )
                     opsCount++
@@ -1532,11 +1668,11 @@ internal object AdminCloudPublisher {
                 val l = repository.getTopThreeLinksOnce() ?: DEFAULT_TOP_THREE_LINKS
                 batch.set(
                     firestore.collection("app_config").document("top_three_links"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "link1Title" to l.link1Title, "link1Url" to l.link1Url, "link1Visible" to l.link1Visible,
                         "link2Title" to l.link2Title, "link2Url" to l.link2Url, "link2Visible" to l.link2Visible,
                         "link3Title" to l.link3Title, "link3Url" to l.link3Url, "link3Visible" to l.link3Visible,
-                        "timestamp" to now
+                        "timestamp" to serverNow
                     )
                 )
                 opsCount++
@@ -1546,10 +1682,10 @@ internal object AdminCloudPublisher {
                 val fb = repository.getFinancialBannerOnce() ?: DEFAULT_FINANCIAL_BANNER
                 batch.set(
                     firestore.collection("app_config").document("financial_banner"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "heading" to fb.heading, "supportingText" to fb.supportingText, "disclaimer" to fb.disclaimer,
                         "buttonText" to fb.buttonText, "destinationType" to fb.destinationType,
-                        "destinationUrl" to fb.destinationUrl, "imageUrl" to fb.imageUrl, "isVisible" to fb.isVisible, "timestamp" to now
+                        "destinationUrl" to fb.destinationUrl, "imageUrl" to fb.imageUrl, "isVisible" to fb.isVisible, "timestamp" to serverNow
                     )
                 )
                 opsCount++
@@ -1559,9 +1695,9 @@ internal object AdminCloudPublisher {
                 val wb = repository.getWhatsAppBannerOnce() ?: DEFAULT_WHATSAPP_BANNER
                 batch.set(
                     firestore.collection("app_config").document("whatsapp_banner"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "bannerText" to wb.bannerText, "buttonText" to wb.buttonText,
-                        "channelUrl" to wb.channelUrl, "isVisible" to wb.isVisible, "timestamp" to now
+                        "channelUrl" to wb.channelUrl, "isVisible" to wb.isVisible, "timestamp" to serverNow
                     )
                 )
                 opsCount++
@@ -1571,10 +1707,10 @@ internal object AdminCloudPublisher {
                 val wa = repository.getWhatsAppDataOnce() ?: WhatsAppLinkConfigEntity(id = 1)
                 batch.set(
                     firestore.collection("whatsapp_config").document("main"),
-                    hashMapOf(
+                    hashMapOf<String, Any>(
                         "channelUrl" to wa.channelUrl, "channelTitle" to wa.channelTitle,
                         "districtGroupsUrl" to wa.districtGroupsUrl, "districtGroupsTitle" to wa.districtGroupsTitle,
-                        "updatedAt" to now
+                        "updatedAt" to serverNow
                     )
                 )
                 opsCount++
@@ -1588,61 +1724,91 @@ internal object AdminCloudPublisher {
                 Log.d(TAG, "Admin bootstrapped $opsCount cloud documents in 1 batch.")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error in Admin bootstrapCloudCollectionsIfEmpty", e)
+            FirestoreErrorHandler.handleFirestoreError(e, OperationType.WRITE, "bootstrap_collections")
         }
     }
 
-    private fun getNoticeDocId(notice: NoticeEntity): String =
+    private val SAFE_DOC_ID_REGEX = Regex("^[a-zA-Z0-9_-]{1,128}$")
+
+    internal fun isSafeDocId(id: String): Boolean = SAFE_DOC_ID_REGEX.matches(id)
+
+    private fun sanitizeDocId(raw: String, fallback: String): String {
+        val cleaned = raw.trim().replace(Regex("[^a-zA-Z0-9_-]+"), "_").trim('_').take(128)
+        return cleaned.ifBlank { fallback }
+    }
+
+    private fun buildSafeDocId(prefix: String, rawSeed: String, hashSource: String): String {
+        val cleanPrefix = prefix.replace(Regex("[^a-zA-Z0-9_-]+"), "_").trim('_').ifBlank { "doc" }
+        val cleanSeed = rawSeed.trim()
+            .replace(Regex("[^a-zA-Z0-9_-]+"), "_")
+            .trim('_')
+            .take(36)
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(hashSource.trim().lowercase().toByteArray(Charsets.UTF_8))
+            .take(5)
+            .joinToString("") { "%02x".format(it) }
+        val parts = listOfNotNull(cleanPrefix, cleanSeed.ifBlank { null }, digest)
+        return parts.joinToString("_").take(80)
+    }
+
+    internal fun resolveBannerDocId(banner: PromoBannerEntity): String {
+        val trimmed = banner.bannerId.trim()
+        return if (isSafeDocId(trimmed)) trimmed
+        else buildSafeDocId("banner", trimmed.ifBlank { banner.title }, "${trimmed}|${banner.title}|${banner.imageUrl}")
+    }
+
+    internal fun getNoticeDocId(notice: NoticeEntity): String =
         if (notice.orderNumber.isNotBlank()) {
-            "ord_" + notice.orderNumber.trim().replace("/", "_").replace(" ", "_").replace(".", "_")
+            buildSafeDocId("ord", notice.orderNumber, "${notice.orderNumber}|${notice.title}")
         } else {
-            "not_" + notice.title.trim().take(30).replace("/", "_").replace(" ", "_").replace(".", "_")
+            buildSafeDocId("not", notice.title, "${notice.title}|${notice.issueDate}|${notice.department}")
         }
 
-    private fun getHolidayDocId(holiday: HolidayEntity): String =
-        "hol_" + holiday.dateStr.trim().replace("/", "_") + "_" + holiday.name.trim().take(20).replace(" ", "_").replace("/", "_")
+    internal fun getHolidayDocId(holiday: HolidayEntity): String =
+        buildSafeDocId("hol", "${holiday.dateStr}_${holiday.name}", "${holiday.dateStr}|${holiday.name}|${holiday.type}")
 
-    private fun getActivityDocId(activity: EducationActivityEntity): String =
+    internal fun getActivityDocId(activity: EducationActivityEntity): String =
         if (activity.orderNumber.isNotBlank()) {
-            "act_" + activity.orderNumber.trim().replace("/", "_").replace(" ", "_").replace(".", "_")
+            buildSafeDocId("act", activity.orderNumber, "${activity.orderNumber}|${activity.title}")
         } else {
-            "act_" + activity.title.trim().take(30).replace("/", "_").replace(" ", "_").replace(".", "_")
+            buildSafeDocId("act", activity.title, "${activity.title}|${activity.category}")
         }
 
-    private fun getPortalDocId(portal: QuickPortalEntity): String =
-        "port_" + portal.title.trim().take(30).replace("/", "_").replace(" ", "_").replace(".", "_")
+    internal fun getPortalDocId(portal: QuickPortalEntity): String =
+        buildSafeDocId("port", portal.title, "${portal.title}|${portal.url}")
 
-    private fun getVideoDocId(video: VideoTutorialEntity): String =
-        if (video.youtubeId.isNotBlank()) "vid_${video.youtubeId}"
-        else "vid_${if (video.id > 0) video.id else System.currentTimeMillis()}"
+    internal fun getVideoDocId(video: VideoTutorialEntity): String =
+        if (video.youtubeId.isNotBlank()) {
+            sanitizeDocId("vid_${video.youtubeId}", buildSafeDocId("vid", video.title, video.youtubeId))
+        } else {
+            "vid_${if (video.id > 0) video.id else System.currentTimeMillis()}"
+        }
 
-    private fun getDownloadDocId(download: DownloadResourceEntity): String =
+    internal fun getDownloadDocId(download: DownloadResourceEntity): String =
         com.example.core.DownloadSyncHelper.resolveCanonicalDocId(download)
 
-    private fun getNewsDocId(news: NewsArticleEntity): String {
-        val basis = (news.title.trim() + "|" + news.sourceUrl.trim()).lowercase()
-        val slug = news.title.take(28).trim().replace(Regex("[^a-zA-Z0-9_]"), "_")
-        val shortHash = (kotlin.math.abs(basis.hashCode())).toString(16)
-        return "news_${slug}_$shortHash"
+    internal fun getNewsDocId(news: NewsArticleEntity): String =
+        buildSafeDocId("news", news.title, "${news.title}|${news.sourceUrl}")
+
+    internal fun getHomeTopLinkDocId(link: HomeTopLinkEntity): String =
+        if (link.id > 0) "top_${link.id}"
+        else buildSafeDocId("top", link.title, "${link.title}|${link.url}")
+
+    internal fun getComplaintDocId(option: ComplaintOptionEntity): String =
+        if (option.id > 0) "comp_${option.id}"
+        else buildSafeDocId("comp", option.title, "${option.title}|${option.phone}|${option.email}")
+
+    internal fun getFinancialServiceDocId(service: FinancialServiceEntity): String {
+        val cat = sanitizeDocId(service.category.lowercase(), "svc").take(16)
+        return if (service.id > 0) "fin_${cat}_${service.id}"
+        else buildSafeDocId("fin_$cat", service.title, "${service.category}|${service.title}|${service.applyUrl}")
     }
 
-    private fun getHomeTopLinkDocId(link: HomeTopLinkEntity): String =
-        if (link.id > 0) "top_${link.id}"
-        else "top_" + link.title.trim().take(30).replace("/", "_").replace(" ", "_")
-
-    private fun getComplaintDocId(option: ComplaintOptionEntity): String =
-        if (option.id > 0) "comp_${option.id}"
-        else "comp_" + option.title.trim().take(30).replace("/", "_").replace(" ", "_")
-
-    private fun getFinancialServiceDocId(service: FinancialServiceEntity): String =
-        if (service.id > 0) "fin_${service.category.lowercase()}_${service.id}"
-        else "fin_${service.category.lowercase()}_" + service.title.trim().take(30).replace("/", "_").replace(" ", "_")
-
-    private fun getYouTubeFeedDocId(feed: YouTubeFeedEntity): String =
+    internal fun getYouTubeFeedDocId(feed: YouTubeFeedEntity): String =
         if (feed.id > 0) "yt_${feed.id}"
-        else "yt_" + feed.channelTitle.trim().take(30).replace("/", "_").replace(" ", "_")
+        else buildSafeDocId("yt", feed.channelTitle, "${feed.channelTitle}|${feed.feedUrl}")
 
-    private fun getNewsRssDocId(feed: NewsRssFeedEntity): String =
+    internal fun getNewsRssDocId(feed: NewsRssFeedEntity): String =
         if (feed.id > 0) "news_rss_${feed.id}"
-        else "news_rss_" + feed.title.trim().take(30).replace("/", "_").replace(" ", "_")
+        else buildSafeDocId("news_rss", feed.title, "${feed.title}|${feed.feedUrl}")
 }

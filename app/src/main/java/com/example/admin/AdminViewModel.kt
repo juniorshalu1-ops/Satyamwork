@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.cloudflare.R2Config
 import com.example.cloudflare.R2FileItem
 import com.example.cloudflare.R2HealthStatus
+import com.example.cloudflare.R2HttpException
 import com.example.cloudflare.R2StorageRepository
 import com.example.cloudflare.R2UploadResult
 import com.example.database.AppDatabase
@@ -26,6 +27,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import org.json.JSONArray
 import org.json.JSONObject
@@ -240,6 +243,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     // ==========================================
     // CLOUDFLARE R2 STORAGE & CDN OPERATIONS
     // ==========================================
+    private val r2Mutex = Mutex()
+
     private val _r2WorkerUrl = MutableStateFlow(R2Config.getWorkerBaseUrl(getApplication()))
     val r2WorkerUrl: StateFlow<String> = _r2WorkerUrl.asStateFlow()
 
@@ -255,109 +260,252 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     private val _r2StatusMessage = MutableStateFlow<String?>(null)
     val r2StatusMessage: StateFlow<String?> = _r2StatusMessage.asStateFlow()
 
+    private val _r2ErrorMessage = MutableStateFlow<String?>(null)
+    val r2ErrorMessage: StateFlow<String?> = _r2ErrorMessage.asStateFlow()
+
+    private val _r2AuthRequired = MutableStateFlow(false)
+    val r2AuthRequired: StateFlow<Boolean> = _r2AuthRequired.asStateFlow()
+
+    private suspend fun <T> executeWithAdminToken(
+        block: suspend (token: String) -> Result<T>
+    ): Result<T> {
+        if (!isOnline()) {
+            return Result.failure(IllegalStateException("इंटरनेट कनेक्शन उपलब्ध नहीं है।"))
+        }
+        val firstToken = getAdminIdToken(forceRefresh = false) ?: getAdminIdToken(forceRefresh = true)
+        if (firstToken.isNullOrBlank()) {
+            _r2AuthRequired.value = true
+            return Result.failure(
+                IllegalStateException("Google एडमिन सत्र समाप्त या अनुपलब्ध है। कृपया Google से पुनः साइन-इन करें।")
+            )
+        }
+        val firstResult = block(firstToken)
+        val err = firstResult.exceptionOrNull()
+        val finalResult = if (err is R2HttpException && err.statusCode == 401) {
+            val freshToken = getAdminIdToken(forceRefresh = true)
+            if (!freshToken.isNullOrBlank()) {
+                block(freshToken)
+            } else {
+                firstResult
+            }
+        } else {
+            firstResult
+        }
+
+        val finalErr = finalResult.exceptionOrNull()
+        if (finalErr is R2HttpException && (finalErr.statusCode == 401 || finalErr.statusCode == 403)) {
+            _r2AuthRequired.value = true
+        } else if (finalResult.isSuccess) {
+            _r2AuthRequired.value = false
+        }
+        return finalResult
+    }
+
     fun saveR2WorkerUrl(rawUrl: String): String {
         val saved = R2Config.saveWorkerBaseUrl(getApplication(), rawUrl)
         _r2WorkerUrl.value = saved
+        _r2ErrorMessage.value = null
         _r2StatusMessage.value = "Worker URL अपडेट किया गया: $saved"
+        refreshR2Dashboard()
         return saved
+    }
+
+    fun resetR2WorkerUrl(): String {
+        R2Config.resetWorkerBaseUrl(getApplication())
+        val defaultUrl = R2Config.getWorkerBaseUrl(getApplication())
+        _r2WorkerUrl.value = defaultUrl
+        _r2ErrorMessage.value = null
+        _r2StatusMessage.value = "डिफ़ॉल्ट Worker URL बहाल किया गया: $defaultUrl"
+        refreshR2Dashboard()
+        return defaultUrl
+    }
+
+    fun refreshR2Dashboard(prefix: String = "") {
+        viewModelScope.launch {
+            r2Mutex.withLock {
+                _isLoadingR2.value = true
+                _r2ErrorMessage.value = null
+                _r2StatusMessage.value = "Cloudflare Worker एवं R2 बकेट सिंक हो रहा है..."
+                try {
+                    val healthRes = R2StorageRepository.checkHealth(getApplication())
+                    healthRes.onSuccess { status ->
+                        _r2HealthStatus.value = status
+                    }.onFailure { err ->
+                        _r2HealthStatus.value = null
+                        _r2ErrorMessage.value = "Worker कनेक्शन त्रुटि: ${err.message}"
+                        _r2StatusMessage.value = null
+                    }
+                    if (healthRes.isFailure) return@withLock
+
+                    loadR2FilesInternal(prefix)
+                } finally {
+                    _isLoadingR2.value = false
+                }
+            }
+        }
     }
 
     fun checkR2Health() {
         viewModelScope.launch {
-            _isLoadingR2.value = true
-            _r2StatusMessage.value = "Cloudflare Worker कनेक्शन जांचा जा रहा है..."
-            R2StorageRepository.checkHealth(getApplication())
-                .onSuccess { status ->
-                    _r2HealthStatus.value = status
-                    _r2StatusMessage.value = if (status.ok) {
-                        "कनेक्टेड: R2 Worker सक्रिय (${status.projectId})"
-                    } else {
-                        "Worker प्रतिक्रिया असामान्य"
-                    }
+            r2Mutex.withLock {
+                _isLoadingR2.value = true
+                _r2ErrorMessage.value = null
+                _r2StatusMessage.value = "Cloudflare Worker कनेक्शन जांचा जा रहा है..."
+                try {
+                    R2StorageRepository.checkHealth(getApplication())
+                        .onSuccess { status ->
+                            _r2HealthStatus.value = status
+                            _r2StatusMessage.value = if (status.ok) {
+                                "कनेक्टेड: R2 Worker सक्रिय (${status.projectId})"
+                            } else {
+                                "Worker प्रतिक्रिया असामान्य"
+                            }
+                        }
+                        .onFailure { err ->
+                            _r2HealthStatus.value = null
+                            _r2ErrorMessage.value = "कनेक्शन त्रुटि: ${err.message}"
+                            _r2StatusMessage.value = null
+                        }
+                } finally {
+                    _isLoadingR2.value = false
                 }
-                .onFailure { err ->
-                    _r2HealthStatus.value = null
-                    _r2StatusMessage.value = "कनेक्शन त्रुटि: ${err.message}"
-                }
-            _isLoadingR2.value = false
+            }
         }
     }
 
     fun loadR2Files(prefix: String = "") {
         viewModelScope.launch {
-            _isLoadingR2.value = true
-            val token = getAdminIdToken(forceRefresh = false)
-            if (token.isNullOrBlank()) {
-                _r2StatusMessage.value = "कृपया पुनः Google Sign-In करें (Auth Token उपलब्ध नहीं)"
-                _isLoadingR2.value = false
-                return@launch
+            r2Mutex.withLock {
+                _isLoadingR2.value = true
+                _r2ErrorMessage.value = null
+                try {
+                    loadR2FilesInternal(prefix)
+                } finally {
+                    _isLoadingR2.value = false
+                }
             }
+        }
+    }
+
+    private suspend fun loadR2FilesInternal(prefix: String = "") {
+        executeWithAdminToken { token ->
             R2StorageRepository.listFiles(getApplication(), token, prefix)
-                .onSuccess { files ->
-                    _r2Files.value = files
-                    _r2StatusMessage.value = "${files.size} फाइलें Cloudflare R2 में उपलब्ध"
-                }
-                .onFailure { err ->
-                    _r2StatusMessage.value = "फाइल सूची त्रुटि: ${err.message}"
-                }
-            _isLoadingR2.value = false
+        }.onSuccess { files ->
+            _r2Files.value = files
+            _r2ErrorMessage.value = null
+            _r2StatusMessage.value = "${files.size} फाइलें Cloudflare R2 CDN में सिंक हैं"
+        }.onFailure { err ->
+            _r2ErrorMessage.value = "R2 बकेट सिंक त्रुटि: ${err.message}"
+            _r2StatusMessage.value = null
         }
     }
 
     fun deleteR2FileDirectly(item: R2FileItem) {
         viewModelScope.launch {
-            val token = getAdminIdToken(forceRefresh = false) ?: return@launch
-            R2StorageRepository.deleteByUrl(getApplication(), item.url, token)
-                .onSuccess { deleted ->
-                    if (deleted) {
-                        _r2Files.value = _r2Files.value.filterNot { it.key == item.key }
-                        _r2StatusMessage.value = "फाइल R2 से हटाई गई: ${item.key}"
-                        repository.logAdminAction(_session.value.email, "R2_DELETE", "Deleted R2 object: ${item.key}")
+            r2Mutex.withLock {
+                _isLoadingR2.value = true
+                _r2ErrorMessage.value = null
+                try {
+                    val target = item.key.ifBlank { item.url }
+                    executeWithAdminToken { token ->
+                        R2StorageRepository.deleteByUrlOrKey(getApplication(), target, token)
+                    }.onSuccess { deleted ->
+                        if (deleted) {
+                            _r2Files.value = _r2Files.value.filterNot { it.key == item.key }
+                            _r2StatusMessage.value = "फाइल R2 से हटाई गई: ${item.key}"
+                            repository.logAdminAction(_session.value.email, "R2_DELETE", "Deleted R2 object: ${item.key}")
+                        } else {
+                            _r2ErrorMessage.value = "R2 फाइल हटाई नहीं जा सकी (${item.key})"
+                        }
+                    }.onFailure { err ->
+                        _r2ErrorMessage.value = "R2 डिलीट त्रुटि: ${err.message}"
                     }
+                } finally {
+                    _isLoadingR2.value = false
                 }
-                .onFailure { err ->
-                    _r2StatusMessage.value = "R2 डिलीट त्रुटि: ${err.message}"
-                }
+            }
         }
     }
 
     fun publishLibraryManifestToR2() {
         viewModelScope.launch {
-            _isLoadingR2.value = true
-            val token = getAdminIdToken(forceRefresh = false)
-            if (token.isNullOrBlank()) {
-                _r2StatusMessage.value = "मेनिफेस्ट प्रकाशन हेतु Google Sign-In आवश्यक है"
-                _isLoadingR2.value = false
-                return@launch
-            }
-            val payload = JSONObject().apply {
-                put("generatedAt", System.currentTimeMillis())
-                put("noticesCount", notices.value.size)
-                put("downloadsCount", downloads.value.size)
-                val dlArr = JSONArray()
-                downloads.value.filter { it.isVisible }.forEach { d ->
-                    dlArr.put(
-                        JSONObject().apply {
-                            put("title", d.title)
-                            put("category", d.category)
-                            put("fileType", d.fileType)
-                            put("fileSize", d.fileSize)
-                            put("url", d.pdfUrl)
-                            put("timestamp", d.timestamp)
+            r2Mutex.withLock {
+                _isLoadingR2.value = true
+                _r2ErrorMessage.value = null
+                _r2StatusMessage.value = "Static JSON Catalog Manifest R2 CDN पर प्रकाशित हो रहा है..."
+                try {
+                    val allDownloads = repository.allDownloadsOnce().filter { it.isVisible }
+                    val allNotices = repository.allNoticesOnce()
+                    val allBanners = repository.allBannersOnce().filter { it.isActive }
+                    val allPortals = repository.allPortalsOnce()
+
+                    val payload = JSONObject().apply {
+                        put("generatedAt", System.currentTimeMillis())
+                        put("noticesCount", allNotices.size)
+                        put("downloadsCount", allDownloads.size)
+                        put("bannersCount", allBanners.size)
+                        put("portalsCount", allPortals.size)
+
+                        val dlArr = JSONArray()
+                        allDownloads.forEach { d ->
+                            dlArr.put(
+                                JSONObject().apply {
+                                    put("title", d.title)
+                                    put("category", d.category)
+                                    put("fileType", d.fileType)
+                                    put("fileSize", d.fileSize)
+                                    put("url", d.pdfUrl)
+                                    put("timestamp", d.timestamp)
+                                }
+                            )
                         }
-                    )
+                        put("downloads", dlArr)
+
+                        val noticeArr = JSONArray()
+                        allNotices.take(100).forEach { n ->
+                            noticeArr.put(
+                                JSONObject().apply {
+                                    put("title", n.title)
+                                    put("category", n.category)
+                                    put("orderNumber", n.orderNumber)
+                                    put("pdfUrl", n.pdfUrl)
+                                    put("imageUrl", n.imageUrl)
+                                    put("issueDate", n.issueDate)
+                                }
+                            )
+                        }
+                        put("notices", noticeArr)
+
+                        val bannerArr = JSONArray()
+                        allBanners.forEach { b ->
+                            bannerArr.put(
+                                JSONObject().apply {
+                                    put("bannerId", b.bannerId)
+                                    put("title", b.title)
+                                    put("imageUrl", b.imageUrl)
+                                    put("destinationUrl", b.destinationUrl)
+                                    put("orderIndex", b.orderIndex)
+                                }
+                            )
+                        }
+                        put("banners", bannerArr)
+                    }
+
+                    executeWithAdminToken { token ->
+                        R2StorageRepository.publishManifest(getApplication(), "library_catalog", payload, token)
+                    }.onSuccess { url ->
+                        _r2ErrorMessage.value = null
+                        _r2StatusMessage.value = "Static JSON Manifest R2 CDN पर प्रकाशित: $url"
+                        repository.logAdminAction(_session.value.email, "R2_MANIFEST", "Published manifest: $url")
+                        loadR2FilesInternal()
+                    }.onFailure { err ->
+                        _r2ErrorMessage.value = "Manifest त्रुटि: ${err.message}"
+                        _r2StatusMessage.value = null
+                    }
+                } finally {
+                    _isLoadingR2.value = false
                 }
-                put("downloads", dlArr)
             }
-            R2StorageRepository.publishManifest(getApplication(), "library_catalog", payload, token)
-                .onSuccess { url ->
-                    _r2StatusMessage.value = "Static JSON Manifest प्रकाशित: $url"
-                    repository.logAdminAction(_session.value.email, "R2_MANIFEST", "Published manifest: $url")
-                }
-                .onFailure { err ->
-                    _r2StatusMessage.value = "Manifest त्रुटि: ${err.message}"
-                }
-            _isLoadingR2.value = false
         }
     }
 
@@ -368,24 +516,17 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         replaceUrl: String = "",
         onProgress: (Float) -> Unit = {}
     ): Result<R2UploadResult> {
-        if (!isOnline()) {
-            return Result.failure(IllegalStateException("फाइल अपलोड हेतु इंटरनेट आवश्यक है।"))
-        }
-        val token = getAdminIdToken(forceRefresh = false) ?: getAdminIdToken(forceRefresh = true)
-        if (token.isNullOrBlank()) {
-            return Result.failure(
-                IllegalStateException("सुरक्षा टोकन उपलब्ध नहीं है। कृपया Google से पुनः लॉगिन करें।")
+        val result = executeWithAdminToken { token ->
+            R2StorageRepository.uploadUri(
+                context = getApplication(),
+                uri = uri,
+                folder = folder,
+                title = title,
+                idToken = token,
+                replaceUrl = replaceUrl,
+                onProgress = onProgress
             )
         }
-        val result = R2StorageRepository.uploadUri(
-            context = getApplication(),
-            uri = uri,
-            folder = folder,
-            title = title,
-            idToken = token,
-            replaceUrl = replaceUrl,
-            onProgress = onProgress
-        )
         result.onSuccess { uploaded ->
             repository.logAdminAction(
                 _session.value.email.ifBlank { SUPER_ADMIN_EMAIL },
@@ -402,8 +543,17 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         if (oldTrimmed.isBlank() || oldTrimmed == newTrimmed) return
         if (!R2Config.isR2ManagedUrl(getApplication(), oldTrimmed)) return
         viewModelScope.launch {
-            val token = getAdminIdToken(forceRefresh = false) ?: return@launch
-            R2StorageRepository.deleteByUrl(getApplication(), oldTrimmed, token)
+            executeWithAdminToken { token ->
+                R2StorageRepository.deleteByUrl(getApplication(), oldTrimmed, token)
+            }
+        }
+    }
+
+    private fun reportCloudAction(actionLabel: String, success: Boolean) {
+        syncStatusMessage.value = if (success) {
+            "क्लाउड अपडेट सफल: $actionLabel"
+        } else {
+            "चेतावनी: '$actionLabel' क्लाउड सर्वर पर सेव नहीं हो सका (इंटरनेट या अधिकृत Google लॉगिन जांचें)।"
         }
     }
 
@@ -434,8 +584,9 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             )
             val newId = repository.insertNotice(notice)
             val withId = notice.copy(id = newId)
-            firebaseManager.publishNoticeToCloud(withId, isNew = true, sendNotification = sendNotification)
-            repository.logAdminAction(_session.value.username, "CREATE_NOTICE", "Published notice (notify: $sendNotification): $title")
+            val cloudOk = firebaseManager.publishNoticeToCloud(withId, isNew = true, sendNotification = sendNotification)
+            reportCloudAction("आदेश प्रकाशन ($title)", cloudOk)
+            repository.logAdminAction(_session.value.username, "CREATE_NOTICE", "Published notice (notify: $sendNotification, cloudOk: $cloudOk): $title")
         }
     }
 
@@ -462,20 +613,22 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 timestamp = System.currentTimeMillis()
             )
             repository.updateNotice(updated)
-            firebaseManager.publishNoticeToCloud(updated, isNew = false, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishNoticeToCloud(updated, isNew = false, sendNotification = sendNotification)
+            reportCloudAction("आदेश अपडेट ($newTitle)", cloudOk)
             deleteR2FileIfReplacedOrRemoved(notice.pdfUrl, newPdfUrl)
             deleteR2FileIfReplacedOrRemoved(notice.imageUrl, newImageUrl)
-            repository.logAdminAction(_session.value.username, "UPDATE_NOTICE", "Updated notice (notify: $sendNotification): $newTitle")
+            repository.logAdminAction(_session.value.username, "UPDATE_NOTICE", "Updated notice (notify: $sendNotification, cloudOk: $cloudOk): $newTitle")
         }
     }
 
     fun deleteNotice(notice: NoticeEntity) {
         viewModelScope.launch {
             repository.deleteNotice(notice)
-            firebaseManager.deleteNoticeFromCloud(notice)
+            val cloudOk = firebaseManager.deleteNoticeFromCloud(notice)
+            reportCloudAction("आदेश डिलीट (${notice.title})", cloudOk)
             deleteR2FileIfReplacedOrRemoved(notice.pdfUrl)
             deleteR2FileIfReplacedOrRemoved(notice.imageUrl)
-            repository.logAdminAction(_session.value.username, "DELETE_NOTICE", "Deleted notice id: ${notice.id}")
+            repository.logAdminAction(_session.value.username, "DELETE_NOTICE", "Deleted notice id: ${notice.id} (cloudOk: $cloudOk)")
         }
     }
 
@@ -494,7 +647,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             )
             val newId = repository.insertHoliday(holiday)
             val withId = holiday.copy(id = newId)
-            firebaseManager.publishHolidayToCloud(withId, isNew = true, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishHolidayToCloud(withId, isNew = true, sendNotification = sendNotification)
+            reportCloudAction("अवकाश ($name)", cloudOk)
             repository.logAdminAction(_session.value.username, "ADD_HOLIDAY", "Added holiday (notify: $sendNotification): $name")
         }
     }
@@ -509,7 +663,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 durationDays = newDays
             )
             repository.updateHoliday(updated)
-            firebaseManager.publishHolidayToCloud(updated, isNew = false, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishHolidayToCloud(updated, isNew = false, sendNotification = sendNotification)
+            reportCloudAction("अवकाश अपडेट ($newName)", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_HOLIDAY", "Updated holiday (notify: $sendNotification): $newName")
         }
     }
@@ -517,7 +672,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteHoliday(holiday: HolidayEntity) {
         viewModelScope.launch {
             repository.deleteHoliday(holiday)
-            firebaseManager.deleteHolidayFromCloud(holiday)
+            val cloudOk = firebaseManager.deleteHolidayFromCloud(holiday)
+            reportCloudAction("अवकाश डिलीट (${holiday.name})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_HOLIDAY", "Deleted holiday: ${holiday.name}")
         }
     }
@@ -536,7 +692,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             )
             val newId = repository.insertActivity(act)
             val withId = act.copy(id = newId)
-            firebaseManager.publishActivityToCloud(withId, isNew = true, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishActivityToCloud(withId, isNew = true, sendNotification = sendNotification)
+            reportCloudAction("गतिविधि ($title)", cloudOk)
             repository.logAdminAction(_session.value.username, "ADD_ACTIVITY", "Added activity (notify: $sendNotification): $title")
         }
     }
@@ -551,7 +708,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 orderNumber = newOrder
             )
             repository.updateActivity(updated)
-            firebaseManager.publishActivityToCloud(updated, isNew = false, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishActivityToCloud(updated, isNew = false, sendNotification = sendNotification)
+            reportCloudAction("गतिविधि अपडेट ($newTitle)", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_ACTIVITY", "Updated activity (notify: $sendNotification): $newTitle")
         }
     }
@@ -559,7 +717,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteActivity(activity: EducationActivityEntity) {
         viewModelScope.launch {
             repository.deleteActivity(activity)
-            firebaseManager.deleteActivityFromCloud(activity)
+            val cloudOk = firebaseManager.deleteActivityFromCloud(activity)
+            reportCloudAction("गतिविधि डिलीट (${activity.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_ACTIVITY", "Deleted activity: ${activity.title}")
         }
     }
@@ -578,7 +737,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             )
             val newId = repository.insertPortal(portal)
             val withId = portal.copy(id = newId)
-            firebaseManager.publishPortalToCloud(withId, isNew = true, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishPortalToCloud(withId, isNew = true, sendNotification = sendNotification)
+            reportCloudAction("पोर्टल ($title)", cloudOk)
             repository.logAdminAction(_session.value.username, "ADD_PORTAL", "Added portal link (notify: $sendNotification): $title")
         }
     }
@@ -593,7 +753,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 colorHex = newColorHex
             )
             repository.updatePortal(updated)
-            firebaseManager.publishPortalToCloud(updated, isNew = false, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishPortalToCloud(updated, isNew = false, sendNotification = sendNotification)
+            reportCloudAction("पोर्टल अपडेट ($newTitle)", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_PORTAL", "Updated portal link (notify: $sendNotification): $newTitle")
         }
     }
@@ -601,7 +762,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deletePortal(portal: QuickPortalEntity) {
         viewModelScope.launch {
             repository.deletePortal(portal)
-            firebaseManager.deletePortalFromCloud(portal)
+            val cloudOk = firebaseManager.deletePortalFromCloud(portal)
+            reportCloudAction("पोर्टल डिलीट (${portal.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_PORTAL", "Deleted portal: ${portal.title}")
         }
     }
@@ -620,11 +782,12 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.insertBanner(banner)
                 banner
             }
-            firebaseManager.publishBannerToCloud(withId, isNew = isNew, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishBannerToCloud(withId, isNew = isNew, sendNotification = sendNotification)
+            reportCloudAction("बैनर (${banner.title})", cloudOk)
             if (!isNew) {
                 deleteR2FileIfReplacedOrRemoved(previousImageUrl, banner.imageUrl)
             }
-            repository.logAdminAction(_session.value.username, "SAVE_BANNER", "Updated banner (notify: $sendNotification): ${banner.title}")
+            repository.logAdminAction(_session.value.username, "SAVE_BANNER", "Updated banner (notify: $sendNotification, cloudOk: $cloudOk): ${banner.title}")
         }
     }
 
@@ -632,9 +795,10 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.deleteBanner(banner)
             val docId = if (banner.bannerId.isNotBlank()) banner.bannerId else banner.id.toString()
-            firebaseManager.deleteBannerFromCloud(docId)
+            val cloudOk = firebaseManager.deleteBannerFromCloud(docId, banner.title)
+            reportCloudAction("बैनर डिलीट (${banner.title})", cloudOk)
             deleteR2FileIfReplacedOrRemoved(banner.imageUrl)
-            repository.logAdminAction(_session.value.username, "DELETE_BANNER", "Deleted banner: ${banner.title}")
+            repository.logAdminAction(_session.value.username, "DELETE_BANNER", "Deleted banner: ${banner.title} (cloudOk: $cloudOk)")
         }
     }
 
@@ -652,7 +816,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 lastUpdated = System.currentTimeMillis()
             )
             repository.saveSchoolTiming(timing)
-            firebaseManager.publishSchoolTimingToCloud(timing, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishSchoolTimingToCloud(timing, sendNotification = sendNotification)
+            reportCloudAction("विद्यालय समय", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_TIMINGS", "Updated school timings (notify: $sendNotification): $opening - $closing, closed: $isClosed ($reason)")
         }
     }
@@ -671,7 +836,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 lastUpdated = System.currentTimeMillis()
             )
             repository.saveWhatsAppData(config)
-            firebaseManager.publishWhatsAppConfigToCloud(config, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishWhatsAppConfigToCloud(config, sendNotification = sendNotification)
+            reportCloudAction("व्हाट्सएप लिंक", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_WHATSAPP", "Updated WhatsApp links (notify: $sendNotification)")
         }
     }
@@ -682,23 +848,25 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun saveVideoTutorial(video: com.example.database.entities.VideoTutorialEntity, sendNotification: Boolean = false) {
         viewModelScope.launch {
             val isNew = (video.id == 0L)
-            if (isNew) {
+            val cloudOk = if (isNew) {
                 val newId = repository.insertVideo(video)
                 val withId = video.copy(id = newId)
-                firebaseManager.publishVideoToCloud(withId, isNew = true, sendNotification = sendNotification)
                 repository.logAdminAction(_session.value.username, "ADD_VIDEO", "Added video (notify: $sendNotification): ${video.title}")
+                firebaseManager.publishVideoToCloud(withId, isNew = true, sendNotification = sendNotification)
             } else {
                 repository.updateVideo(video)
-                firebaseManager.publishVideoToCloud(video, isNew = false, sendNotification = sendNotification)
                 repository.logAdminAction(_session.value.username, "UPDATE_VIDEO", "Updated video (notify: $sendNotification): ${video.title}")
+                firebaseManager.publishVideoToCloud(video, isNew = false, sendNotification = sendNotification)
             }
+            reportCloudAction("वीडियो (${video.title})", cloudOk)
         }
     }
 
     fun deleteVideoTutorial(video: com.example.database.entities.VideoTutorialEntity) {
         viewModelScope.launch {
             repository.deleteVideo(video)
-            firebaseManager.deleteVideoFromCloud(video)
+            val cloudOk = firebaseManager.deleteVideoFromCloud(video)
+            reportCloudAction("वीडियो डिलीट (${video.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_VIDEO", "Deleted video: ${video.title}")
         }
     }
@@ -707,7 +875,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = video.copy(isPinned = !video.isPinned)
             repository.updateVideo(updated)
-            firebaseManager.publishVideoToCloud(updated, isNew = false)
+            val cloudOk = firebaseManager.publishVideoToCloud(updated, isNew = false)
+            reportCloudAction("वीडियो पिन (${video.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "PIN_VIDEO", "Toggled pin for: ${video.title}")
         }
     }
@@ -716,7 +885,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = video.copy(isFeaturedOnHome = !video.isFeaturedOnHome)
             repository.updateVideo(updated)
-            firebaseManager.publishVideoToCloud(updated, isNew = false)
+            val cloudOk = firebaseManager.publishVideoToCloud(updated, isNew = false)
+            reportCloudAction("होम वीडियो (${video.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "FEATURE_VIDEO_HOME", "Toggled featured on home for: ${video.title}")
         }
     }
@@ -765,7 +935,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             )
             repository.insertFeatureBox(newBox)
             val updatedList = repository.getAllFeatureBoxesOnce()
-            firebaseManager.publishFeatureBoxesToCloud(updatedList, isNew = true, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishFeatureBoxesToCloud(updatedList, isNew = true, sendNotification = sendNotification)
+            reportCloudAction("नई सेवा ($title)", cloudOk)
             repository.logAdminAction(_session.value.username, "ADD_FEATURE_BOX", "Added new service #$nextOrder (notify: $sendNotification): $title")
         }
     }
@@ -773,9 +944,10 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteFeatureBox(box: com.example.database.entities.FeatureBoxEntity) {
         viewModelScope.launch {
             repository.deleteFeatureBox(box)
-            firebaseManager.deleteFeatureBoxFromCloud(box)
+            val deletedOk = firebaseManager.deleteFeatureBoxFromCloud(box)
             val updatedList = repository.getAllFeatureBoxesOnce()
-            firebaseManager.publishFeatureBoxesToCloud(updatedList, isNew = false)
+            val publishedOk = firebaseManager.publishFeatureBoxesToCloud(updatedList, isNew = false)
+            reportCloudAction("सेवा डिलीट (${box.title})", deletedOk && publishedOk)
             repository.logAdminAction(_session.value.username, "DELETE_FEATURE_BOX", "Deleted service: ${box.title}")
         }
     }
@@ -791,7 +963,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             repository.updateFeatureBox(updated)
             val all = repository.getAllFeatureBoxesOnce()
             val mapped = all.map { if (it.id == updated.id) updated else it }
-            firebaseManager.publishFeatureBoxesToCloud(mapped, isNew = false, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishFeatureBoxesToCloud(mapped, isNew = false, sendNotification = sendNotification)
+            reportCloudAction("सेवा अपडेट ($newTitle)", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_FEATURE_BOX", "Updated feature box (notify: $sendNotification): $newTitle (visible: $isVisible)")
         }
     }
@@ -812,7 +985,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateFeatureBox(updatedTarget)
                 list[currentIndex] = updatedTarget
                 list[targetIndex] = updatedCurrent
-                firebaseManager.publishFeatureBoxesToCloud(list, isNew = false)
+                val cloudOk = firebaseManager.publishFeatureBoxesToCloud(list, isNew = false)
+                reportCloudAction("सेवा क्रम (${box.title})", cloudOk)
                 repository.logAdminAction(_session.value.username, "REORDER_FEATURE_BOX", "Moved ${box.title} ${if (direction < 0) "UP" else "DOWN"}")
             }
         }
@@ -837,7 +1011,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 lastUpdated = System.currentTimeMillis()
             )
             repository.saveTopThreeLinks(entity)
-            firebaseManager.publishTopThreeLinksToCloud(entity, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishTopThreeLinksToCloud(entity, sendNotification = sendNotification)
+            reportCloudAction("मुख्य 3 पोर्टल लिंक", cloudOk)
             repository.logAdminAction(_session.value.username, "SAVE_TOP_LINKS", "Updated top 3 official links (notify: $sendNotification)")
         }
     }
@@ -856,7 +1031,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 lastUpdated = System.currentTimeMillis()
             )
             repository.saveFinancialBanner(entity)
-            firebaseManager.publishFinancialBannerToCloud(entity, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishFinancialBannerToCloud(entity, sendNotification = sendNotification)
+            reportCloudAction("वित्तीय बैनर", cloudOk)
             deleteR2FileIfReplacedOrRemoved(previousImageUrl, imageUrl)
             repository.logAdminAction(_session.value.username, "SAVE_FINANCIAL_BANNER", "Updated financial banner (notify: $sendNotification): $heading")
         }
@@ -875,7 +1051,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 lastUpdated = System.currentTimeMillis()
             )
             repository.saveWhatsAppBanner(entity)
-            firebaseManager.publishWhatsAppBannerToCloud(entity, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishWhatsAppBannerToCloud(entity, sendNotification = sendNotification)
+            reportCloudAction("व्हाट्सएप बैनर", cloudOk)
             deleteR2FileIfReplacedOrRemoved(previousImageUrl, imageUrl)
             repository.logAdminAction(_session.value.username, "SAVE_WHATSAPP_BANNER", "Updated WhatsApp banner (notify: $sendNotification): $channelUrl")
         }
@@ -900,8 +1077,9 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendBroadcastNotification(title: String, section: String, details: String) {
         viewModelScope.launch {
-            firebaseManager.broadcastAdminUpload(title, section, details)
-            repository.logAdminAction(_session.value.username, "SPECIAL_BROADCAST", "Sent special lockscreen notification: $title")
+            val cloudOk = firebaseManager.broadcastAdminUpload(title, section, details)
+            reportCloudAction("विशेष घोषणा ($title)", cloudOk)
+            repository.logAdminAction(_session.value.username, "SPECIAL_BROADCAST", "Sent special lockscreen notification (cloudOk: $cloudOk): $title")
         }
     }
 
@@ -916,7 +1094,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         currentHraUrban.value = urbanHra
         viewModelScope.launch {
             repository.updateGlobalSalaryRules(newDa, ruralHra, urbanHra)
-            firebaseManager.publishSalaryRuleToCloud(newDa, ruralHra, urbanHra)
+            val cloudOk = firebaseManager.publishSalaryRuleToCloud(newDa, ruralHra, urbanHra)
+            reportCloudAction("वेतन नियम (DA $newDa%)", cloudOk)
             repository.logAdminAction(_session.value.username, "UPDATE_SALARY_RULE", "Published new DA: $newDa%, Rural HRA: $ruralHra%, Urban: $urbanHra%")
         }
     }
@@ -930,13 +1109,26 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun syncAllDataToCloud(onComplete: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             isSyncing.value = true
+            if (!isOnline()) {
+                isSyncing.value = false
+                syncStatusMessage.value = "चेतावनी: सिंक विफल — कृपया इंटरनेट कनेक्शन जांचें।"
+                onComplete(false)
+                return@launch
+            }
+            val token = getAdminIdToken(forceRefresh = false) ?: getAdminIdToken(forceRefresh = true)
+            if (token.isNullOrBlank()) {
+                isSyncing.value = false
+                syncStatusMessage.value = "चेतावनी: कृपया अधिकृत Admin Google खाता ($SUPER_ADMIN_EMAIL) से पुनः लॉगिन करें।"
+                onComplete(false)
+                return@launch
+            }
             syncStatusMessage.value = "क्लाउड सर्वर पर सभी डेटा सिंक हो रहा है..."
-            val success = firebaseManager.syncAllLocalDataToCloud(repository)
+            val success = firebaseManager.syncAllLocalDataToCloud(repository, forceFull = true)
             isSyncing.value = false
             syncStatusMessage.value = if (success) {
-                "सभी डेटा क्लाउड सर्वर पर सफलतापूर्वक सिंक हो गया और सभी उपयोगकर्ताओं को सूचना प्रसारित की गई!"
+                "सभी डेटा क्लाउड सर्वर पर सफलतापूर्वक सिंक हो गया और सभी उपयोगकर्ताओं को अपडेट भेजा गया!"
             } else {
-                "सिंक विफल: कृपया इंटरनेट कनेक्शन जांचें"
+                "चेतावनी: क्लाउड सिंक असफल रहा — कृपया अधिकृत Admin खाता व इंटरनेट जांचें।"
             }
             repository.logAdminAction(_session.value.username, "MANUAL_SYNC", "Triggered full cloud push sync. Result: $success")
             onComplete(success)
@@ -958,14 +1150,16 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.logAdminAction(_session.value.username, "UPDATE_TOP_LINK", "Updated top link (notify: $sendNotification): ${link.title}")
                 link
             }
-            firebaseManager.publishHomeTopLinkToCloud(entityToPublish, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishHomeTopLinkToCloud(entityToPublish, sendNotification = sendNotification)
+            reportCloudAction("होम लिंक (${link.title})", cloudOk)
         }
     }
 
     fun deleteHomeTopLink(link: com.example.database.entities.HomeTopLinkEntity) {
         viewModelScope.launch {
             repository.deleteHomeTopLink(link)
-            firebaseManager.deleteHomeTopLinkFromCloud(link)
+            val cloudOk = firebaseManager.deleteHomeTopLinkFromCloud(link)
+            reportCloudAction("होम लिंक डिलीट (${link.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_TOP_LINK", "Deleted top link: ${link.title}")
         }
     }
@@ -974,7 +1168,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = link.copy(isVisible = !link.isVisible)
             repository.updateHomeTopLink(updated)
-            firebaseManager.publishHomeTopLinkToCloud(updated)
+            val cloudOk = firebaseManager.publishHomeTopLinkToCloud(updated)
+            reportCloudAction("होम लिंक दृश्यता (${link.title})", cloudOk)
         }
     }
 
@@ -993,14 +1188,16 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.logAdminAction(_session.value.username, "UPDATE_COMPLAINT_OPTION", "Updated complaint option (notify: $sendNotification): ${option.title}")
                 option
             }
-            firebaseManager.publishComplaintOptionToCloud(entityToPublish, sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishComplaintOptionToCloud(entityToPublish, sendNotification = sendNotification)
+            reportCloudAction("शिकायत विकल्प (${option.title})", cloudOk)
         }
     }
 
     fun deleteComplaintOption(option: com.example.database.entities.ComplaintOptionEntity) {
         viewModelScope.launch {
             repository.deleteComplaintOption(option)
-            firebaseManager.deleteComplaintOptionFromCloud(option)
+            val cloudOk = firebaseManager.deleteComplaintOptionFromCloud(option)
+            reportCloudAction("शिकायत डिलीट (${option.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_COMPLAINT_OPTION", "Deleted complaint option: ${option.title}")
         }
     }
@@ -1009,7 +1206,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = option.copy(isVisible = !option.isVisible)
             repository.updateComplaintOption(updated)
-            firebaseManager.publishComplaintOptionToCloud(updated)
+            val cloudOk = firebaseManager.publishComplaintOptionToCloud(updated)
+            reportCloudAction("शिकायत दृश्यता (${option.title})", cloudOk)
         }
     }
 
@@ -1028,14 +1226,16 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.logAdminAction(_session.value.username, "UPDATE_FINANCIAL_SERVICE", "Updated ${service.category} (notify: $sendNotification): ${service.title}")
                 service
             }
-            firebaseManager.publishFinancialServiceToCloud(entityToPublish, isNew = (service.id == 0L), sendNotification = sendNotification)
+            val cloudOk = firebaseManager.publishFinancialServiceToCloud(entityToPublish, isNew = (service.id == 0L), sendNotification = sendNotification)
+            reportCloudAction("वित्तीय सेवा (${service.title})", cloudOk)
         }
     }
 
     fun deleteFinancialService(service: com.example.database.entities.FinancialServiceEntity) {
         viewModelScope.launch {
             repository.deleteFinancialService(service)
-            firebaseManager.deleteFinancialServiceFromCloud(service)
+            val cloudOk = firebaseManager.deleteFinancialServiceFromCloud(service)
+            reportCloudAction("वित्तीय सेवा डिलीट (${service.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_FINANCIAL_SERVICE", "Deleted ${service.category}: ${service.title}")
         }
     }
@@ -1044,7 +1244,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = service.copy(isVisible = !service.isVisible)
             repository.updateFinancialService(updated)
-            firebaseManager.publishFinancialServiceToCloud(updated)
+            val cloudOk = firebaseManager.publishFinancialServiceToCloud(updated)
+            reportCloudAction("वित्तीय सेवा दृश्यता (${service.title})", cloudOk)
         }
     }
 
@@ -1063,7 +1264,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.logAdminAction(_session.value.username, "UPDATE_YOUTUBE_FEED", "Updated RSS Feed: ${feed.channelTitle}")
                 feed
             }
-            firebaseManager.publishYouTubeFeedToCloud(entityToPublish)
+            val cloudOk = firebaseManager.publishYouTubeFeedToCloud(entityToPublish)
+            reportCloudAction("YouTube RSS (${feed.channelTitle})", cloudOk)
             repository.refreshYouTubeRssVideos(forceRefresh = true)
         }
     }
@@ -1071,7 +1273,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteYouTubeFeed(feed: com.example.database.entities.YouTubeFeedEntity) {
         viewModelScope.launch {
             repository.deleteYouTubeFeed(feed)
-            firebaseManager.deleteYouTubeFeedFromCloud(feed)
+            val cloudOk = firebaseManager.deleteYouTubeFeedFromCloud(feed)
+            reportCloudAction("YouTube RSS डिलीट (${feed.channelTitle})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_YOUTUBE_FEED", "Deleted RSS Feed: ${feed.channelTitle}")
         }
     }
@@ -1080,7 +1283,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = feed.copy(isVisible = !feed.isVisible)
             repository.updateYouTubeFeed(updated)
-            firebaseManager.publishYouTubeFeedToCloud(updated)
+            val cloudOk = firebaseManager.publishYouTubeFeedToCloud(updated)
+            reportCloudAction("YouTube RSS दृश्यता (${feed.channelTitle})", cloudOk)
             repository.refreshYouTubeRssVideos(forceRefresh = true)
         }
     }
@@ -1114,24 +1318,26 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             }
             val canonicalEntity = download.copy(cloudId = canonicalCloudId)
             val isNew = (canonicalEntity.id == 0L)
-            if (isNew) {
+            val cloudOk = if (isNew) {
                 val newId = repository.insertDownload(canonicalEntity)
                 val withId = canonicalEntity.copy(id = newId)
-                firebaseManager.publishDownloadToCloud(withId, isNew = true, sendNotification = sendNotification)
                 repository.logAdminAction(_session.value.username, "ADD_DOWNLOAD", "Added download resource (notify: $sendNotification): ${canonicalEntity.title}")
+                firebaseManager.publishDownloadToCloud(withId, isNew = true, sendNotification = sendNotification)
             } else {
                 repository.updateDownload(canonicalEntity)
-                firebaseManager.publishDownloadToCloud(canonicalEntity, isNew = false, sendNotification = sendNotification)
                 deleteR2FileIfReplacedOrRemoved(previousUrl, canonicalEntity.pdfUrl)
                 repository.logAdminAction(_session.value.username, "UPDATE_DOWNLOAD", "Updated download resource (notify: $sendNotification): ${canonicalEntity.title}")
+                firebaseManager.publishDownloadToCloud(canonicalEntity, isNew = false, sendNotification = sendNotification)
             }
+            reportCloudAction("डाउनलोड फाइल (${canonicalEntity.title})", cloudOk)
         }
     }
 
     fun deleteDownloadResource(download: com.example.database.entities.DownloadResourceEntity) {
         viewModelScope.launch {
             repository.deleteDownload(download)
-            firebaseManager.deleteDownloadFromCloud(download)
+            val cloudOk = firebaseManager.deleteDownloadFromCloud(download)
+            reportCloudAction("डाउनलोड डिलीट (${download.title})", cloudOk)
             deleteR2FileIfReplacedOrRemoved(download.pdfUrl)
             repository.logAdminAction(_session.value.username, "DELETE_DOWNLOAD", "Deleted download: ${download.title}")
         }
@@ -1141,7 +1347,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = download.copy(isVisible = !download.isVisible)
             repository.updateDownload(updated)
-            firebaseManager.publishDownloadToCloud(updated, isNew = false)
+            val cloudOk = firebaseManager.publishDownloadToCloud(updated, isNew = false)
+            reportCloudAction("डाउनलोड दृश्यता (${download.title})", cloudOk)
         }
     }
 
@@ -1150,7 +1357,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
             val current = repository.getGoogleDriveConfigOnce() ?: com.example.database.entities.DEFAULT_GOOGLE_DRIVE_CONFIG
             val updated = current.copy(isEnabled = isEnabled)
             repository.saveGoogleDriveConfig(updated)
-            firebaseManager.publishGoogleDriveConfigToCloud(isEnabled, updated.folderUrl)
+            val cloudOk = firebaseManager.publishGoogleDriveConfigToCloud(isEnabled, updated.folderUrl)
+            reportCloudAction("Google Drive सेटिंग", cloudOk)
             repository.logAdminAction(_session.value.username, "TOGGLE_DRIVE", "Google Drive set to: $isEnabled")
         }
     }
@@ -1162,24 +1370,26 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val previousImageUrl = newsArticles.value.find { it.id == news.id }?.imageUrl.orEmpty()
             val isNew = (news.id == 0L)
-            if (isNew) {
+            val cloudOk = if (isNew) {
                 val newId = repository.insertNews(news)
                 val withId = news.copy(id = newId)
-                firebaseManager.publishNewsToCloud(withId, isNew = true, sendNotification = sendNotification)
                 repository.logAdminAction(_session.value.username, "ADD_NEWS", "Added news (notify: $sendNotification): ${news.title}")
+                firebaseManager.publishNewsToCloud(withId, isNew = true, sendNotification = sendNotification)
             } else {
                 repository.updateNews(news)
-                firebaseManager.publishNewsToCloud(news, isNew = false, sendNotification = sendNotification)
                 deleteR2FileIfReplacedOrRemoved(previousImageUrl, news.imageUrl)
                 repository.logAdminAction(_session.value.username, "UPDATE_NEWS", "Updated news (notify: $sendNotification): ${news.title}")
+                firebaseManager.publishNewsToCloud(news, isNew = false, sendNotification = sendNotification)
             }
+            reportCloudAction("समाचार (${news.title})", cloudOk)
         }
     }
 
     fun deleteNewsArticle(news: com.example.database.entities.NewsArticleEntity) {
         viewModelScope.launch {
             repository.deleteNews(news)
-            firebaseManager.deleteNewsFromCloud(news)
+            val cloudOk = firebaseManager.deleteNewsFromCloud(news)
+            reportCloudAction("समाचार डिलीट (${news.title})", cloudOk)
             deleteR2FileIfReplacedOrRemoved(news.imageUrl)
             repository.logAdminAction(_session.value.username, "DELETE_NEWS", "Deleted news: ${news.title}")
         }
@@ -1189,7 +1399,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = news.copy(isVisible = !news.isVisible)
             repository.updateNews(updated)
-            firebaseManager.publishNewsToCloud(updated, isNew = false)
+            val cloudOk = firebaseManager.publishNewsToCloud(updated, isNew = false)
+            reportCloudAction("समाचार दृश्यता (${news.title})", cloudOk)
         }
     }
 
@@ -1203,12 +1414,14 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val updated = news.copy(isPinned = true, pinOrder = currentPinned.size + 1)
                 repository.updateNews(updated)
-                firebaseManager.publishNewsToCloud(updated, isNew = false)
+                val cloudOk = firebaseManager.publishNewsToCloud(updated, isNew = false)
+                reportCloudAction("समाचार पिन (${news.title})", cloudOk)
                 repository.logAdminAction(_session.value.username, "PIN_NEWS", "Pinned news: ${news.title}")
             } else {
                 val updated = news.copy(isPinned = false, pinOrder = 0)
                 repository.updateNews(updated)
-                firebaseManager.publishNewsToCloud(updated, isNew = false)
+                val cloudOk = firebaseManager.publishNewsToCloud(updated, isNew = false)
+                reportCloudAction("समाचार अनपिन (${news.title})", cloudOk)
                 repository.logAdminAction(_session.value.username, "UNPIN_NEWS", "Unpinned news: ${news.title}")
             }
         }
@@ -1251,7 +1464,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
                 repository.logAdminAction(_session.value.username, "UPDATE_NEWS_RSS", "Updated News RSS Feed: ${feed.title}")
                 feed
             }
-            firebaseManager.publishNewsRssFeedToCloud(entityToPublish)
+            val cloudOk = firebaseManager.publishNewsRssFeedToCloud(entityToPublish)
+            reportCloudAction("News RSS (${feed.title})", cloudOk)
             repository.refreshNewsRssArticles(forceRefresh = true)
         }
     }
@@ -1259,7 +1473,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteNewsRssFeed(feed: com.example.database.entities.NewsRssFeedEntity) {
         viewModelScope.launch {
             repository.deleteNewsRssFeed(feed)
-            firebaseManager.deleteNewsRssFeedFromCloud(feed)
+            val cloudOk = firebaseManager.deleteNewsRssFeedFromCloud(feed)
+            reportCloudAction("News RSS डिलीट (${feed.title})", cloudOk)
             repository.logAdminAction(_session.value.username, "DELETE_NEWS_RSS", "Deleted News RSS Feed: ${feed.title}")
         }
     }
@@ -1268,7 +1483,8 @@ class AdminViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val updated = feed.copy(isVisible = !feed.isVisible)
             repository.updateNewsRssFeed(updated)
-            firebaseManager.publishNewsRssFeedToCloud(updated)
+            val cloudOk = firebaseManager.publishNewsRssFeedToCloud(updated)
+            reportCloudAction("News RSS दृश्यता (${feed.title})", cloudOk)
             repository.refreshNewsRssArticles(forceRefresh = true)
         }
     }

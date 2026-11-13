@@ -1,0 +1,481 @@
+{
+  "entities": {
+    "Notice": {
+      "title": "Notice",
+      "description": "Departmental notice or circular published by the admin. Timestamps must be submitted with FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Notice headline" },
+        "summary": { "type": "string", "description": "Brief summary of the notice" },
+        "category": { "type": "string", "description": "Notice category" },
+        "issueDate": { "type": "string", "description": "Formatted issue date string" },
+        "department": { "type": "string", "description": "Issuing department" },
+        "orderNumber": { "type": "string", "description": "Official order/letter number" },
+        "officialUrl": { "type": "string", "description": "Official portal URL" },
+        "pdfUrl": { "type": "string", "description": "Hosted R2 or external PDF URL" },
+        "imageUrl": { "type": "string", "description": "Hosted R2 or external preview image URL" },
+        "isFeatured": { "type": "boolean", "description": "Pinned to featured list" },
+        "isPublished": { "type": "boolean", "description": "Publication state" },
+        "publishedBy": { "type": "string", "description": "Publisher UID (optional Cloud Function field)" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (Cloud Function)" }
+      },
+      "required": ["title", "summary", "category", "issueDate", "isPublished"]
+    },
+    "HolidayCalendar": {
+      "title": "HolidayCalendar",
+      "description": "Official Bihar school holiday entry. Timestamps use FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "dateStr": { "type": "string" },
+        "dayOfWeek": { "type": "string" },
+        "month": { "type": "integer" },
+        "type": { "type": "string" },
+        "durationDays": { "type": "integer" },
+        "description": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "dateStr", "month", "type", "durationDays", "timestamp"]
+    },
+    "EducationActivity": {
+      "title": "EducationActivity",
+      "description": "School activity or campaign record. Timestamps use FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "linkUrl": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "description", "category", "timestamp"]
+    },
+    "QuickPortal": {
+      "title": "QuickPortal",
+      "description": "Quick portal shortcut card. Timestamps use FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "url": { "type": "string" },
+        "badge": { "type": "string" },
+        "colorHex": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "url", "timestamp"]
+    },
+    "AdminBroadcast": {
+      "title": "AdminBroadcast",
+      "description": "Latest alert and circular 10-slot history buffer. Timestamps use FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "alertId": { "type": "string" },
+        "title": { "type": "string" },
+        "section": { "type": "string" },
+        "details": { "type": "string" },
+        "contentType": { "type": "string" },
+        "contentId": { "type": "string" },
+        "targetSection": { "type": "string" },
+        "targetUrl": { "type": "string" },
+        "adminEmail": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "loudAlert": { "type": "boolean" },
+        "isHistory": { "type": "boolean" },
+        "slotIndex": { "type": "integer" },
+        "seq": { "type": "integer" }
+      },
+      "required": ["alertId", "title", "section", "details", "timestamp"]
+    },
+    "SyncVersionsMeta": {
+      "title": "SyncVersionsMeta",
+      "description": "Single gatekeeper version document for differential client sync. updatedAt uses FieldValue.serverTimestamp().",
+      "type": "object",
+      "properties": {
+        "notices_v": { "type": "integer" },
+        "holidays_v": { "type": "integer" },
+        "activities_v": { "type": "integer" },
+        "portals_v": { "type": "integer" },
+        "banners_v": { "type": "integer" },
+        "school_timing_v": { "type": "integer" },
+        "whatsapp_config_v": { "type": "integer" },
+        "videos_v": { "type": "integer" },
+        "downloads_v": { "type": "integer" },
+        "google_drive_v": { "type": "integer" },
+        "news_v": { "type": "integer" },
+        "feature_boxes_v": { "type": "integer" },
+        "top_three_links_v": { "type": "integer" },
+        "financial_banner_v": { "type": "integer" },
+        "whatsapp_banner_v": { "type": "integer" },
+        "salary_rules_v": { "type": "integer" },
+        "home_top_links_v": { "type": "integer" },
+        "complaint_options_v": { "type": "integer" },
+        "financial_services_v": { "type": "integer" },
+        "youtube_feeds_v": { "type": "integer" },
+        "news_rss_feeds_v": { "type": "integer" },
+        "alert_v": { "type": "integer" },
+        "broadcastSeq": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SchoolTimingConfig": {
+      "title": "SchoolTimingConfig",
+      "description": "Global Bihar school timing & holiday closure state.",
+      "type": "object",
+      "properties": {
+        "openingTime": { "type": "string" },
+        "closingTime": { "type": "string" },
+        "isManuallyClosed": { "type": "boolean" },
+        "closureReason": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["openingTime", "closingTime", "isManuallyClosed", "updatedAt"]
+    },
+    "WhatsAppConfig": {
+      "title": "WhatsAppConfig",
+      "description": "Official WhatsApp community & channel URLs.",
+      "type": "object",
+      "properties": {
+        "channelUrl": { "type": "string" },
+        "channelTitle": { "type": "string" },
+        "districtGroupsUrl": { "type": "string" },
+        "districtGroupsTitle": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channelUrl", "channelTitle", "updatedAt"]
+    },
+    "GoogleDriveConfig": {
+      "title": "GoogleDriveConfig",
+      "description": "Teacher Google Drive archive configuration.",
+      "type": "object",
+      "properties": {
+        "isEnabled": { "type": "boolean" },
+        "folderUrl": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["isEnabled", "folderUrl", "updatedAt"]
+    },
+    "AppConfigCard": {
+      "title": "AppConfigCard",
+      "description": "Home top three links, financial banner, or WhatsApp banner configuration.",
+      "type": "object",
+      "properties": {
+        "link1Title": { "type": "string" },
+        "link1Url": { "type": "string" },
+        "link1Visible": { "type": "boolean" },
+        "link2Title": { "type": "string" },
+        "link2Url": { "type": "string" },
+        "link2Visible": { "type": "boolean" },
+        "link3Title": { "type": "string" },
+        "link3Url": { "type": "string" },
+        "link3Visible": { "type": "boolean" },
+        "heading": { "type": "string" },
+        "supportingText": { "type": "string" },
+        "disclaimer": { "type": "string" },
+        "destinationType": { "type": "string" },
+        "destinationUrl": { "type": "string" },
+        "bannerText": { "type": "string" },
+        "buttonText": { "type": "string" },
+        "channelUrl": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["timestamp"]
+    },
+    "FeatureBox": {
+      "title": "FeatureBox",
+      "description": "Home grid feature card configuration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "iconType": { "type": "string" },
+        "destinationRoute": { "type": "string" },
+        "displayOrder": { "type": "integer" },
+        "isVisible": { "type": "boolean" },
+        "isExternal": { "type": "boolean" },
+        "externalUrl": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "displayOrder", "isVisible", "timestamp"]
+    },
+    "HomeTopLink": {
+      "title": "HomeTopLink",
+      "description": "Configurable top bar external link.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "displayOrder": { "type": "integer" },
+        "lastUpdated": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "url", "isVisible", "displayOrder", "timestamp"]
+    },
+    "ComplaintOption": {
+      "title": "ComplaintOption",
+      "description": "Teacher grievance helpline or portal option.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "linkUrl": { "type": "string" },
+        "portalUrl": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "displayOrder": { "type": "integer" },
+        "lastUpdated": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "isVisible", "displayOrder", "timestamp"]
+    },
+    "FinancialService": {
+      "title": "FinancialService",
+      "description": "Teacher loan, card, or investment option.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "category": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "applyUrl": { "type": "string" },
+        "isGoogleForm": { "type": "boolean" },
+        "buttonText": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "displayOrder": { "type": "integer" },
+        "lastUpdated": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["category", "title", "isVisible", "displayOrder", "timestamp"]
+    },
+    "PromoBanner": {
+      "title": "PromoBanner",
+      "description": "Home carousel promotional banner with R2/CDN image.",
+      "type": "object",
+      "properties": {
+        "bannerId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "destinationUrl": { "type": "string" },
+        "buttonText": { "type": "string" },
+        "orderIndex": { "type": "integer" },
+        "isActive": { "type": "boolean" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["bannerId", "title", "orderIndex", "isActive", "publishedAt"]
+    },
+    "NewsArticle": {
+      "title": "NewsArticle",
+      "description": "Education news article curated by admin.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "content": { "type": "string" },
+        "category": { "type": "string" },
+        "publishedAt": { "type": "string" },
+        "source": { "type": "string" },
+        "sourceUrl": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "isPinned": { "type": "boolean" },
+        "pinOrder": { "type": "integer" },
+        "isBreaking": { "type": "boolean" },
+        "isVisible": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "isVisible", "timestamp"]
+    },
+    "VideoTutorial": {
+      "title": "VideoTutorial",
+      "description": "Featured/pinned YouTube tutorial entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "youtubeUrl": { "type": "string" },
+        "youtubeId": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "duration": { "type": "string" },
+        "description": { "type": "string" },
+        "isPinned": { "type": "boolean" },
+        "isFeaturedOnHome": { "type": "boolean" },
+        "displayOrder": { "type": "integer" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "youtubeUrl", "publishedAt"]
+    },
+    "DownloadResource": {
+      "title": "DownloadResource",
+      "description": "Downloadable PDF/form entry backed by Cloudflare R2 or official URL.",
+      "type": "object",
+      "properties": {
+        "cloudId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "fileSize": { "type": "string" },
+        "pdfUrl": { "type": "string" },
+        "publicationDate": { "type": "string" },
+        "orderNumber": { "type": "string" },
+        "description": { "type": "string" },
+        "fileType": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["cloudId", "title", "category", "isVisible", "publishedAt"]
+    },
+    "YouTubeFeed": {
+      "title": "YouTubeFeed",
+      "description": "Official teacher YouTube RSS feed source.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "channelTitle": { "type": "string" },
+        "feedUrl": { "type": "string" },
+        "channelId": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "lastUpdated": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channelTitle", "feedUrl", "isVisible", "timestamp"]
+    },
+    "NewsRssFeed": {
+      "title": "NewsRssFeed",
+      "description": "Live education news RSS feed source.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "title": { "type": "string" },
+        "feedUrl": { "type": "string" },
+        "isVisible": { "type": "boolean" },
+        "lastUpdated": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "feedUrl", "isVisible", "timestamp"]
+    },
+    "SalaryRule": {
+      "title": "SalaryRule",
+      "description": "Global DA and HRA percentages used across salary calculation screens.",
+      "type": "object",
+      "properties": {
+        "daPercent": { "type": "number" },
+        "ruralHra": { "type": "number" },
+        "urbanHra": { "type": "number" },
+        "effectiveDate": { "type": "string" },
+        "publishedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["daPercent", "ruralHra", "urbanHra", "publishedAt"]
+    },
+    "AdminAuditLog": {
+      "title": "AdminAuditLog",
+      "description": "Immutable admin operation audit log entry.",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "action", "details", "timestamp"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Privileged administrator directory record (restricted PII).",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "displayName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    },
+    "AiConfig": {
+      "title": "AiConfig",
+      "description": "AI drafting feature availability and quota policy.",
+      "type": "object",
+      "properties": {
+        "isEnabled": { "type": "boolean" },
+        "dailyLimitPerDevice": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["isEnabled", "dailyLimitPerDevice"]
+    },
+    "FeedbackItem": {
+      "title": "FeedbackItem",
+      "description": "Authenticated teacher feedback entry.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "message": { "type": "string" },
+        "category": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "message", "createdAt"]
+    },
+    "LegacyPublicConfig": {
+      "title": "LegacyPublicConfig",
+      "description": "Legacy public configuration and template documents.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "name": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ServerOnlyRecord": {
+      "title": "ServerOnlyRecord",
+      "description": "Records written exclusively by Firebase Cloud Functions Admin SDK.",
+      "type": "object",
+      "properties": {
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/notices/{noticeId}": { "schema": { "$ref": "#/entities/Notice" }, "description": "Publicly readable notices; admin-only writes" },
+    "/holiday_calendars/{calId}": { "schema": { "$ref": "#/entities/HolidayCalendar" }, "description": "Publicly readable holiday list; admin-only writes" },
+    "/activities/{activityId}": { "schema": { "$ref": "#/entities/EducationActivity" }, "description": "Publicly readable activities; admin-only writes" },
+    "/quick_portals/{portalId}": { "schema": { "$ref": "#/entities/QuickPortal" }, "description": "Publicly readable portal links; admin-only writes" },
+    "/admin_broadcasts/{broadcastId}": { "schema": { "$ref": "#/entities/AdminBroadcast" }, "description": "Latest alert & 10-slot circular history; admin-only writes" },
+    "/app_meta/{metaId}": { "schema": { "$ref": "#/entities/SyncVersionsMeta" }, "description": "Version gatekeeper metadata; admin-only writes" },
+    "/school_config/{docId}": { "schema": { "$ref": "#/entities/SchoolTimingConfig" }, "description": "School timing configuration; admin-only writes" },
+    "/whatsapp_config/{docId}": { "schema": { "$ref": "#/entities/WhatsAppConfig" }, "description": "WhatsApp links config; admin-only writes" },
+    "/app_configs/{docId}": { "schema": { "$ref": "#/entities/GoogleDriveConfig" }, "description": "Google Drive ON/OFF configuration; admin-only writes" },
+    "/app_config/{docId}": { "schema": { "$ref": "#/entities/AppConfigCard" }, "description": "Top three links, financial banner, WhatsApp banner; admin-only writes" },
+    "/feature_boxes/{boxId}": { "schema": { "$ref": "#/entities/FeatureBox" }, "description": "Home grid boxes; admin-only writes" },
+    "/home_top_links/{linkId}": { "schema": { "$ref": "#/entities/HomeTopLink" }, "description": "Home quick bar links; admin-only writes" },
+    "/complaint_options/{optId}": { "schema": { "$ref": "#/entities/ComplaintOption" }, "description": "Complaint desk channels; admin-only writes" },
+    "/financial_services/{serviceId}": { "schema": { "$ref": "#/entities/FinancialService" }, "description": "Teacher financial services; admin-only writes" },
+    "/promo_banners/{bannerId}": { "schema": { "$ref": "#/entities/PromoBanner" }, "description": "Promotional home banners; admin-only writes" },
+    "/news_articles/{newsId}": { "schema": { "$ref": "#/entities/NewsArticle" }, "description": "Admin-published education news; admin-only writes" },
+    "/video_tutorials/{videoId}": { "schema": { "$ref": "#/entities/VideoTutorial" }, "description": "Video tutorials; admin-only writes" },
+    "/download_resources/{resId}": { "schema": { "$ref": "#/entities/DownloadResource" }, "description": "PDF and form download items; admin-only writes" },
+    "/youtube_feeds/{feedId}": { "schema": { "$ref": "#/entities/YouTubeFeed" }, "description": "YouTube RSS feeds; admin-only writes" },
+    "/news_rss_feeds/{feedId}": { "schema": { "$ref": "#/entities/NewsRssFeed" }, "description": "News RSS feeds; admin-only writes" },
+    "/salary_rules/{ruleId}": { "schema": { "$ref": "#/entities/SalaryRule" }, "description": "DA and HRA percentages; admin-only writes" },
+    "/admin_audit_logs/{logId}": { "schema": { "$ref": "#/entities/AdminAuditLog" }, "description": "Append-only admin audit trail" },
+    "/admin_users/{adminUid}": { "schema": { "$ref": "#/entities/AdminUser" }, "description": "Restricted admin profile directory" },
+    "/ai_config/{configId}": { "schema": { "$ref": "#/entities/AiConfig" }, "description": "AI writer rate-limit & enablement config" },
+    "/feedback/{feedbackId}": { "schema": { "$ref": "#/entities/FeedbackItem" }, "description": "Authenticated teacher feedback submissions" },
+    "/audit_logs/{logId}": { "schema": { "$ref": "#/entities/ServerOnlyRecord" }, "description": "Server-only Cloud Functions audit logs" },
+    "/ai_usage/{deviceId}": { "schema": { "$ref": "#/entities/ServerOnlyRecord" }, "description": "Server-only daily AI usage counters" },
+    "/notification_history/{notifId}": { "schema": { "$ref": "#/entities/ServerOnlyRecord" }, "description": "Server-only FCM dispatch logs" },
+    "/notice_categories/{catId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy notice categories" },
+    "/public_config/{docId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy public configuration" },
+    "/app_versions/{docId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy app version metadata" },
+    "/banners/{bannerId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy banners collection" },
+    "/salary_rule_versions/{verId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy salary rule versions" },
+    "/application_templates/{templateId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy AI application templates" },
+    "/knowledge_documents/{docId}": { "schema": { "$ref": "#/entities/LegacyPublicConfig" }, "description": "Legacy reference documents" }
+  }
+}

@@ -29,8 +29,9 @@ import com.example.database.entities.WhatsAppBannerEntity
 import com.example.database.entities.WhatsAppLinkConfigEntity
 import com.example.database.entities.YouTubeFeedEntity
 import com.google.firebase.FirebaseApp
-import com.google.firebase.Timestamp
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.Source
@@ -72,19 +73,15 @@ class FirebaseManager private constructor(private val context: Context) {
         } catch (_: Throwable) {
             ""
         }
-        val db = try {
-            if (databaseId.isNotBlank() && databaseId != "DEFAULT") {
-                try {
-                    val app = FirebaseApp.getInstance()
-                    FirebaseFirestore.getInstance(app, databaseId)
-                } catch (_: Throwable) {
-                    FirebaseFirestore.getInstance()
-                }
-            } else {
-                FirebaseFirestore.getInstance()
+        val db = if (databaseId.isNotBlank() && databaseId != "DEFAULT") {
+            val app = try {
+                FirebaseApp.getInstance()
+            } catch (_: Throwable) {
+                FirebaseApp.initializeApp(context)
+                    ?: throw IllegalStateException("FirebaseApp initialization failed for database $databaseId")
             }
-        } catch (e: Throwable) {
-            Log.e(TAG, "Critical: Failed to get Firestore instance", e)
+            FirebaseFirestore.getInstance(app, databaseId)
+        } else {
             FirebaseFirestore.getInstance()
         }
         try {
@@ -200,7 +197,11 @@ class FirebaseManager private constructor(private val context: Context) {
                     .document(CloudSyncEngine.SYNC_VERSIONS_DOC)
                     .addSnapshotListener(MetadataChanges.EXCLUDE) { doc, e ->
                         if (e != null) {
-                            Log.w(TAG, "sync_versions listen failed", e)
+                            FirestoreErrorHandler.handleFirestoreError(
+                                e,
+                                OperationType.GET,
+                                "${CloudSyncEngine.META_COLLECTION}/${CloudSyncEngine.SYNC_VERSIONS_DOC}"
+                            )
                             if (!isNetworkCurrentlyConnected()) _isCloudConnected.value = false
                             return@addSnapshotListener
                         }
@@ -267,7 +268,15 @@ class FirebaseManager private constructor(private val context: Context) {
                     )
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "syncChangedCollectionsOnce failed", t)
+                if (t is FirebaseFirestoreException) {
+                    FirestoreErrorHandler.handleFirestoreError(
+                        t,
+                        OperationType.GET,
+                        "${CloudSyncEngine.META_COLLECTION}/${CloudSyncEngine.SYNC_VERSIONS_DOC}"
+                    )
+                } else {
+                    Log.w(TAG, "syncChangedCollectionsOnce failed", t)
+                }
                 if (!isNetworkCurrentlyConnected()) _isCloudConnected.value = false
             }
         }
@@ -411,8 +420,8 @@ class FirebaseManager private constructor(private val context: Context) {
     suspend fun publishBannerToCloud(banner: PromoBannerEntity, isNew: Boolean = false, sendNotification: Boolean = false): Boolean =
         AdminCloudPublisher.publishBannerToCloud(firestore, banner, ::broadcastAdminUpload, sendNotification)
 
-    suspend fun deleteBannerFromCloud(bannerId: String): Boolean =
-        AdminCloudPublisher.deleteBannerFromCloud(firestore, bannerId)
+    suspend fun deleteBannerFromCloud(bannerId: String, title: String = ""): Boolean =
+        AdminCloudPublisher.deleteBannerFromCloud(firestore, bannerId, title)
 
     // --- School Timings & WhatsApp Config ---
     suspend fun publishSchoolTimingToCloud(timing: SchoolTimingEntity, isNew: Boolean = false, sendNotification: Boolean = false): Boolean =
@@ -512,16 +521,18 @@ class FirebaseManager private constructor(private val context: Context) {
 
     // --- Admin Audit Log Cloud Sync ---
     suspend fun logAdminActionToCloud(username: String, action: String, details: String): Boolean {
+        val logId = "log_${System.currentTimeMillis()}"
         return try {
-            val logData = hashMapOf(
+            val logData = hashMapOf<String, Any>(
                 "username" to username,
                 "action" to action,
                 "details" to details,
-                "timestamp" to Timestamp.now()
+                "timestamp" to FieldValue.serverTimestamp()
             )
-            firestore.collection("admin_audit_logs").document("log_${System.currentTimeMillis()}").set(logData).await()
+            firestore.collection("admin_audit_logs").document(logId).set(logData).await()
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            FirestoreErrorHandler.handleFirestoreError(e, OperationType.CREATE, "admin_audit_logs/$logId")
             false
         }
     }

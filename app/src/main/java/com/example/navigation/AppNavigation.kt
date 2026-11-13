@@ -218,17 +218,17 @@ fun MainAppContainer() {
             }
             com.example.core.DeepLinkType.DOWNLOAD -> {
                 subScreenBackStack.clear()
-                subScreenBackStack.add(Screen.Downloads)
+                navigateToSubScreen(Screen.Downloads)
                 homeViewModel.dispatchDeepLink(target)
             }
             com.example.core.DeepLinkType.NOTICE -> {
                 subScreenBackStack.clear()
-                subScreenBackStack.add(Screen.LatestOrders)
+                navigateToSubScreen(Screen.LatestOrders)
                 homeViewModel.dispatchDeepLink(target)
             }
             com.example.core.DeepLinkType.HOLIDAY -> {
                 subScreenBackStack.clear()
-                subScreenBackStack.add(Screen.HolidayCalendar)
+                navigateToSubScreen(Screen.HolidayCalendar)
                 homeViewModel.dispatchDeepLink(target)
             }
             com.example.core.DeepLinkType.HOME -> {

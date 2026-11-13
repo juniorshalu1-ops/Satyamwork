@@ -21,6 +21,7 @@ object FileDownloadHelper {
     private const val TAG = "FileDownloadHelper"
     private const val CACHE_SUBDIR = "r2_docs_cache"
     private const val HTTP_CACHE_DIR = "r2_http_cache"
+    private const val MAX_DOC_CACHE_BYTES = 75L * 1024L * 1024L
 
     @Volatile
     private var cachedClient: OkHttpClient? = null
@@ -109,6 +110,7 @@ object FileDownloadHelper {
             val mime = mimeForExtension(ext)
 
             if (targetFile.exists() && targetFile.length() > 0L) {
+                targetFile.setLastModified(System.currentTimeMillis())
                 return Result.success(targetFile to mime)
             }
 
@@ -145,11 +147,28 @@ object FileDownloadHelper {
                     tmpFile.copyTo(finalFile, overwrite = true)
                     tmpFile.delete()
                 }
+                finalFile.setLastModified(System.currentTimeMillis())
+                pruneCacheIfNeeded(cacheFolder)
                 Result.success(finalFile to mimeForExtension(actualExt))
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to cache document locally: $url", e)
             Result.failure(e)
+        }
+    }
+
+    private fun pruneCacheIfNeeded(cacheFolder: File) {
+        val files = cacheFolder.listFiles()?.filter { it.isFile } ?: return
+        var totalSize = files.sumOf { it.length() }
+        if (totalSize <= MAX_DOC_CACHE_BYTES) return
+
+        val oldestFirst = files.sortedBy { it.lastModified() }
+        for (file in oldestFirst) {
+            if (totalSize <= (MAX_DOC_CACHE_BYTES * 80) / 100) break
+            val size = file.length()
+            if (file.delete()) {
+                totalSize -= size
+            }
         }
     }
 

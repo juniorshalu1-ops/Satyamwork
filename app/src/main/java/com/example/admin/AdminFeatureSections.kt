@@ -1363,7 +1363,7 @@ fun AdminVideosManagementTab(
                         onValueChange = {
                             ytUrl = it
                             val extracted = YouTubeUrlHelper.extractVideoId(it)
-                            if (extracted != null) {
+                            if (extracted.isNotBlank()) {
                                 autoYtId = extracted
                             }
                         },

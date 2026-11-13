@@ -47,6 +47,11 @@ data class R2HealthStatus(
     val publicR2Configured: Boolean
 )
 
+class R2HttpException(
+    val statusCode: Int,
+    message: String
+) : IOException(message)
+
 object R2StorageRepository {
     private const val TAG = "R2StorageRepository"
 
@@ -72,7 +77,10 @@ object R2StorageRepository {
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
-                        IOException("Worker HTTP ${response.code}: ${extractErrorMessage(bodyStr)}")
+                        R2HttpException(
+                            response.code,
+                            "Worker HTTP ${response.code}: ${extractErrorMessage(bodyStr)}"
+                        )
                     )
                 }
                 val json = JSONObject(bodyStr)
@@ -160,7 +168,10 @@ object R2StorageRepository {
                 if (!response.isSuccessful) {
                     val err = extractErrorMessage(bodyStr)
                     return@withContext Result.failure(
-                        IOException("अपलोड विफल (HTTP ${response.code}): $err")
+                        R2HttpException(
+                            response.code,
+                            "अपलोड विफल (HTTP ${response.code}): $err"
+                        )
                     )
                 }
 
@@ -196,19 +207,36 @@ object R2StorageRepository {
         context: Context,
         url: String,
         idToken: String
-    ): Result<Boolean> = withContext(Dispatchers.IO) {
+    ): Result<Boolean> {
         val trimmed = url.trim()
         if (trimmed.isBlank() || !R2Config.isR2ManagedUrl(context, trimmed)) {
+            return Result.success(false)
+        }
+        return deleteByUrlOrKey(context, trimmed, idToken)
+    }
+
+    suspend fun deleteByUrlOrKey(
+        context: Context,
+        urlOrKey: String,
+        idToken: String
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        val trimmed = urlOrKey.trim()
+        if (trimmed.isBlank()) {
+            return@withContext Result.success(false)
+        }
+        val isHttpUrl = trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        if (isHttpUrl && !R2Config.isR2ManagedUrl(context, trimmed)) {
             return@withContext Result.success(false)
         }
         if (idToken.isBlank()) {
-            return@withContext Result.failure(IllegalStateException("Missing auth token"))
+            return@withContext Result.failure(R2HttpException(401, "Missing auth token"))
         }
 
         try {
             val baseUrl = R2Config.getWorkerBaseUrl(context)
             val payload = JSONObject().apply {
-                put("url", trimmed)
+                if (isHttpUrl) put("url", trimmed) else put("key", trimmed)
             }.toString()
 
             val request = Request.Builder()
@@ -221,7 +249,10 @@ object R2StorageRepository {
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
-                        IOException("Delete HTTP ${response.code}: ${extractErrorMessage(bodyStr)}")
+                        R2HttpException(
+                            response.code,
+                            "Delete HTTP ${response.code}: ${extractErrorMessage(bodyStr)}"
+                        )
                     )
                 }
                 val json = JSONObject(bodyStr)
@@ -259,7 +290,10 @@ object R2StorageRepository {
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
-                        IOException("List HTTP ${response.code}: ${extractErrorMessage(bodyStr)}")
+                        R2HttpException(
+                            response.code,
+                            "List HTTP ${response.code}: ${extractErrorMessage(bodyStr)}"
+                        )
                     )
                 }
                 val json = JSONObject(bodyStr)
@@ -317,7 +351,10 @@ object R2StorageRepository {
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
-                        IOException("Manifest HTTP ${response.code}: ${extractErrorMessage(bodyStr)}")
+                        R2HttpException(
+                            response.code,
+                            "Manifest HTTP ${response.code}: ${extractErrorMessage(bodyStr)}"
+                        )
                     )
                 }
                 val json = JSONObject(bodyStr)

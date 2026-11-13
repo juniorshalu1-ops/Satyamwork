@@ -1,9 +1,12 @@
 package com.example.ai_application
 
+import android.util.Log
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 data class AiApplicationRequest(
     val recipient: String,
@@ -26,20 +29,29 @@ data class AiApplicationResponse(
 )
 
 object AiApplicationService {
+    private const val TAG = "AiApplicationService"
+    private const val AI_TIMEOUT_MS = 30_000L
+
+    private val generativeModel by lazy {
+        Firebase.ai.generativeModel("gemini-3.8-flash")
+    }
 
     suspend fun generateApplication(request: AiApplicationRequest): AiApplicationResponse = withContext(Dispatchers.IO) {
         // Try Firebase AI Logic if available and permitted
         try {
             val promptText = buildPrompt(request)
-            val model = Firebase.ai.generativeModel("gemini-2.5-flash")
-            val response = model.generateContent(promptText)
+            val response = withTimeout(AI_TIMEOUT_MS) {
+                generativeModel.generateContent(promptText)
+            }
             val text = response.text ?: ""
             if (text.isNotBlank()) {
                 val parsed = parseAiOutput(text, request)
                 return@withContext parsed.copy(isAiGenerated = true)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            // Graceful fallback to high quality offline official templates
+            Log.w(TAG, "Firebase AI Logic generation failed; using offline format", e)
         }
 
         // High-Quality Rule-Based Offline Application Generation

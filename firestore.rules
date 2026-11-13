@@ -2,151 +2,785 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 1. Core Public & Admin Content Collections (जैसे विभागीय आदेश)
-    match /notices/{noticeId} {
-      allow read, write: if true;
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
     }
 
-    match /notice_categories/{catId} {
-      allow read, write: if true;
+    // --- Reusable Auth & Validation Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email is string &&
+        request.auth.token.email.lower() == 'satyamprakash100@gmail.com';
+    }
+
+    function isBoundedStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptStr(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isOptInt(data, field) {
+      return !(field in data) || data[field] is int;
+    }
+
+    function isOptNumber(data, field) {
+      return !(field in data) || (data[field] is int || data[field] is float);
+    }
+
+    function isValidServerTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    function isOptTimestamp(data, field) {
+      return !(field in data) || isValidServerTimestamp(data[field]);
+    }
+
+    // --- Collection Schema Validators ---
+
+    function isValidNotice(data) {
+      return data.keys().hasAll(['title', 'summary', 'category', 'issueDate', 'isPublished']) &&
+        data.keys().hasOnly([
+          'title', 'summary', 'category', 'issueDate', 'department', 'orderNumber',
+          'officialUrl', 'pdfUrl', 'imageUrl', 'isFeatured', 'isPublished',
+          'publishedBy', 'timestamp', 'createdAt'
+        ]) &&
+        isBoundedStr(data.title, 1, 500) &&
+        isBoundedStr(data.summary, 0, 4000) &&
+        isBoundedStr(data.category, 1, 120) &&
+        isBoundedStr(data.issueDate, 0, 64) &&
+        data.isPublished is bool &&
+        isOptStr(data, 'department', 300) &&
+        isOptStr(data, 'orderNumber', 120) &&
+        isOptStr(data, 'officialUrl', 1000) &&
+        isOptStr(data, 'pdfUrl', 1000) &&
+        isOptStr(data, 'imageUrl', 1000) &&
+        isOptStr(data, 'publishedBy', 128) &&
+        isOptBool(data, 'isFeatured') &&
+        (('timestamp' in data && isValidServerTimestamp(data.timestamp)) ||
+         ('createdAt' in data && isValidServerTimestamp(data.createdAt))) &&
+        isOptTimestamp(data, 'timestamp') &&
+        isOptTimestamp(data, 'createdAt');
+    }
+
+    function isValidHoliday(data) {
+      return data.keys().hasAll(['name', 'dateStr', 'month', 'type', 'durationDays', 'timestamp']) &&
+        data.keys().hasOnly([
+          'name', 'dateStr', 'dayOfWeek', 'month', 'type', 'durationDays', 'description', 'timestamp'
+        ]) &&
+        isBoundedStr(data.name, 1, 300) &&
+        isBoundedStr(data.dateStr, 0, 64) &&
+        isOptStr(data, 'dayOfWeek', 64) &&
+        data.month is int && data.month >= 1 && data.month <= 12 &&
+        isBoundedStr(data.type, 1, 120) &&
+        data.durationDays is int && data.durationDays >= 1 && data.durationDays <= 366 &&
+        isOptStr(data, 'description', 1000) &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidActivity(data) {
+      return data.keys().hasAll(['title', 'description', 'category', 'timestamp']) &&
+        data.keys().hasOnly([
+          'title', 'description', 'category', 'linkUrl', 'orderNumber', 'timestamp'
+        ]) &&
+        isBoundedStr(data.title, 1, 300) &&
+        isBoundedStr(data.description, 0, 2000) &&
+        isBoundedStr(data.category, 1, 120) &&
+        isOptStr(data, 'linkUrl', 1000) &&
+        isOptStr(data, 'orderNumber', 120) &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidPortal(data) {
+      return data.keys().hasAll(['title', 'url', 'timestamp']) &&
+        data.keys().hasOnly([
+          'title', 'subtitle', 'url', 'badge', 'colorHex', 'timestamp'
+        ]) &&
+        isBoundedStr(data.title, 1, 200) &&
+        isOptStr(data, 'subtitle', 300) &&
+        isBoundedStr(data.url, 0, 1000) &&
+        isOptStr(data, 'badge', 64) &&
+        isOptStr(data, 'colorHex', 32) &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidAdminBroadcast(data) {
+      return data.keys().hasAll(['alertId', 'title', 'section', 'details', 'timestamp']) &&
+        data.keys().hasOnly([
+          'alertId', 'title', 'section', 'details', 'contentType', 'contentId',
+          'targetSection', 'targetUrl', 'adminEmail', 'timestamp', 'loudAlert',
+          'isHistory', 'slotIndex', 'seq'
+        ]) &&
+        isBoundedStr(data.alertId, 1, 128) &&
+        isBoundedStr(data.title, 1, 500) &&
+        isBoundedStr(data.section, 1, 200) &&
+        isBoundedStr(data.details, 0, 2000) &&
+        isOptStr(data, 'contentType', 64) &&
+        isOptStr(data, 'contentId', 300) &&
+        isOptStr(data, 'targetSection', 120) &&
+        isOptStr(data, 'targetUrl', 1000) &&
+        isOptStr(data, 'adminEmail', 254) &&
+        isOptBool(data, 'loudAlert') &&
+        isOptBool(data, 'isHistory') &&
+        isOptInt(data, 'slotIndex') &&
+        isOptInt(data, 'seq') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidAppMeta(data) {
+      return data.keys().hasOnly([
+          'notices_v', 'holidays_v', 'activities_v', 'portals_v', 'banners_v',
+          'school_timing_v', 'whatsapp_config_v', 'videos_v', 'downloads_v',
+          'google_drive_v', 'news_v', 'feature_boxes_v', 'top_three_links_v',
+          'financial_banner_v', 'whatsapp_banner_v', 'salary_rules_v',
+          'home_top_links_v', 'complaint_options_v', 'financial_services_v',
+          'youtube_feeds_v', 'news_rss_feeds_v', 'alert_v', 'broadcastSeq', 'updatedAt'
+        ]) &&
+        data.keys().size() >= 1 &&
+        isOptInt(data, 'notices_v') &&
+        isOptInt(data, 'holidays_v') &&
+        isOptInt(data, 'activities_v') &&
+        isOptInt(data, 'portals_v') &&
+        isOptInt(data, 'banners_v') &&
+        isOptInt(data, 'school_timing_v') &&
+        isOptInt(data, 'whatsapp_config_v') &&
+        isOptInt(data, 'videos_v') &&
+        isOptInt(data, 'downloads_v') &&
+        isOptInt(data, 'google_drive_v') &&
+        isOptInt(data, 'news_v') &&
+        isOptInt(data, 'feature_boxes_v') &&
+        isOptInt(data, 'top_three_links_v') &&
+        isOptInt(data, 'financial_banner_v') &&
+        isOptInt(data, 'whatsapp_banner_v') &&
+        isOptInt(data, 'salary_rules_v') &&
+        isOptInt(data, 'home_top_links_v') &&
+        isOptInt(data, 'complaint_options_v') &&
+        isOptInt(data, 'financial_services_v') &&
+        isOptInt(data, 'youtube_feeds_v') &&
+        isOptInt(data, 'news_rss_feeds_v') &&
+        isOptInt(data, 'alert_v') &&
+        isOptInt(data, 'broadcastSeq') &&
+        isOptTimestamp(data, 'updatedAt');
+    }
+
+    function isValidSchoolConfig(data) {
+      return data.keys().hasAll(['openingTime', 'closingTime', 'isManuallyClosed', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'openingTime', 'closingTime', 'isManuallyClosed', 'closureReason', 'updatedAt'
+        ]) &&
+        isBoundedStr(data.openingTime, 1, 64) &&
+        isBoundedStr(data.closingTime, 1, 64) &&
+        data.isManuallyClosed is bool &&
+        isOptStr(data, 'closureReason', 500) &&
+        isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidWhatsAppConfig(data) {
+      return data.keys().hasAll(['channelUrl', 'channelTitle', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'channelUrl', 'channelTitle', 'districtGroupsUrl', 'districtGroupsTitle', 'updatedAt'
+        ]) &&
+        isBoundedStr(data.channelUrl, 0, 1000) &&
+        isBoundedStr(data.channelTitle, 1, 300) &&
+        isOptStr(data, 'districtGroupsUrl', 1000) &&
+        isOptStr(data, 'districtGroupsTitle', 300) &&
+        isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidGoogleDriveConfig(data) {
+      return data.keys().hasAll(['isEnabled', 'folderUrl', 'updatedAt']) &&
+        data.keys().hasOnly(['isEnabled', 'folderUrl', 'updatedAt']) &&
+        data.isEnabled is bool &&
+        isBoundedStr(data.folderUrl, 0, 1000) &&
+        isValidServerTimestamp(data.updatedAt);
+    }
+
+    function isValidAppConfigCard(data) {
+      return data.keys().hasAll(['timestamp']) &&
+        data.keys().hasOnly([
+          'link1Title', 'link1Url', 'link1Visible',
+          'link2Title', 'link2Url', 'link2Visible',
+          'link3Title', 'link3Url', 'link3Visible',
+          'heading', 'supportingText', 'disclaimer',
+          'destinationType', 'destinationUrl',
+          'bannerText', 'buttonText', 'channelUrl',
+          'imageUrl', 'isVisible', 'timestamp'
+        ]) &&
+        isOptStr(data, 'link1Title', 200) &&
+        isOptStr(data, 'link1Url', 1000) &&
+        isOptBool(data, 'link1Visible') &&
+        isOptStr(data, 'link2Title', 200) &&
+        isOptStr(data, 'link2Url', 1000) &&
+        isOptBool(data, 'link2Visible') &&
+        isOptStr(data, 'link3Title', 200) &&
+        isOptStr(data, 'link3Url', 1000) &&
+        isOptBool(data, 'link3Visible') &&
+        isOptStr(data, 'heading', 300) &&
+        isOptStr(data, 'supportingText', 1000) &&
+        isOptStr(data, 'disclaimer', 500) &&
+        isOptStr(data, 'destinationType', 64) &&
+        isOptStr(data, 'destinationUrl', 1000) &&
+        isOptStr(data, 'bannerText', 500) &&
+        isOptStr(data, 'buttonText', 100) &&
+        isOptStr(data, 'channelUrl', 1000) &&
+        isOptStr(data, 'imageUrl', 1000) &&
+        isOptBool(data, 'isVisible') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidFeatureBox(data) {
+      return data.keys().hasAll(['id', 'title', 'displayOrder', 'isVisible', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'subtitle', 'iconType', 'destinationRoute',
+          'displayOrder', 'isVisible', 'isExternal', 'externalUrl', 'timestamp'
+        ]) &&
+        isBoundedStr(data.id, 1, 128) &&
+        isBoundedStr(data.title, 1, 200) &&
+        isOptStr(data, 'subtitle', 300) &&
+        isOptStr(data, 'iconType', 100) &&
+        isOptStr(data, 'destinationRoute', 200) &&
+        data.displayOrder is int &&
+        data.isVisible is bool &&
+        isOptBool(data, 'isExternal') &&
+        isOptStr(data, 'externalUrl', 1000) &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidHomeTopLink(data) {
+      return data.keys().hasAll(['title', 'url', 'isVisible', 'displayOrder', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'url', 'isVisible', 'displayOrder', 'lastUpdated', 'timestamp'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.title, 1, 200) &&
+        isBoundedStr(data.url, 0, 1000) &&
+        data.isVisible is bool &&
+        data.displayOrder is int &&
+        isOptInt(data, 'lastUpdated') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidComplaintOption(data) {
+      return data.keys().hasAll(['title', 'isVisible', 'displayOrder', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'description', 'phone', 'email', 'linkUrl',
+          'portalUrl', 'isVisible', 'displayOrder', 'lastUpdated', 'timestamp'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.title, 1, 300) &&
+        isOptStr(data, 'description', 1000) &&
+        isOptStr(data, 'phone', 64) &&
+        isOptStr(data, 'email', 254) &&
+        isOptStr(data, 'linkUrl', 1000) &&
+        isOptStr(data, 'portalUrl', 1000) &&
+        data.isVisible is bool &&
+        data.displayOrder is int &&
+        isOptInt(data, 'lastUpdated') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidFinancialService(data) {
+      return data.keys().hasAll(['category', 'title', 'isVisible', 'displayOrder', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'category', 'title', 'description', 'applyUrl',
+          'isGoogleForm', 'buttonText', 'isVisible', 'displayOrder', 'lastUpdated', 'timestamp'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.category, 1, 64) &&
+        isBoundedStr(data.title, 1, 300) &&
+        isOptStr(data, 'description', 1500) &&
+        isOptStr(data, 'applyUrl', 1000) &&
+        isOptBool(data, 'isGoogleForm') &&
+        isOptStr(data, 'buttonText', 100) &&
+        data.isVisible is bool &&
+        data.displayOrder is int &&
+        isOptInt(data, 'lastUpdated') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidPromoBanner(data) {
+      return data.keys().hasAll(['bannerId', 'title', 'orderIndex', 'isActive', 'publishedAt']) &&
+        data.keys().hasOnly([
+          'bannerId', 'title', 'description', 'category', 'imageUrl',
+          'destinationUrl', 'buttonText', 'orderIndex', 'isActive', 'publishedAt'
+        ]) &&
+        isBoundedStr(data.bannerId, 1, 128) &&
+        isBoundedStr(data.title, 1, 300) &&
+        isOptStr(data, 'description', 1000) &&
+        isOptStr(data, 'category', 120) &&
+        isOptStr(data, 'imageUrl', 1000) &&
+        isOptStr(data, 'destinationUrl', 1000) &&
+        isOptStr(data, 'buttonText', 100) &&
+        data.orderIndex is int &&
+        data.isActive is bool &&
+        isValidServerTimestamp(data.publishedAt);
+    }
+
+    function isValidNewsArticle(data) {
+      return data.keys().hasAll(['title', 'category', 'isVisible', 'timestamp']) &&
+        data.keys().hasOnly([
+          'title', 'summary', 'content', 'category', 'publishedAt', 'source',
+          'sourceUrl', 'imageUrl', 'isPinned', 'pinOrder', 'isBreaking',
+          'isVisible', 'timestamp'
+        ]) &&
+        isBoundedStr(data.title, 1, 500) &&
+        isOptStr(data, 'summary', 2000) &&
+        isOptStr(data, 'content', 15000) &&
+        isBoundedStr(data.category, 1, 120) &&
+        isOptStr(data, 'publishedAt', 120) &&
+        isOptStr(data, 'source', 200) &&
+        isOptStr(data, 'sourceUrl', 1000) &&
+        isOptStr(data, 'imageUrl', 1000) &&
+        isOptBool(data, 'isPinned') &&
+        isOptInt(data, 'pinOrder') &&
+        isOptBool(data, 'isBreaking') &&
+        data.isVisible is bool &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidVideoTutorial(data) {
+      return data.keys().hasAll(['title', 'youtubeUrl', 'publishedAt']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'category', 'youtubeUrl', 'youtubeId', 'thumbnailUrl',
+          'duration', 'description', 'isPinned', 'isFeaturedOnHome',
+          'displayOrder', 'publishedAt'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.title, 1, 400) &&
+        isOptStr(data, 'category', 120) &&
+        isBoundedStr(data.youtubeUrl, 0, 1000) &&
+        isOptStr(data, 'youtubeId', 128) &&
+        isOptStr(data, 'thumbnailUrl', 1000) &&
+        isOptStr(data, 'duration', 64) &&
+        isOptStr(data, 'description', 2000) &&
+        isOptBool(data, 'isPinned') &&
+        isOptBool(data, 'isFeaturedOnHome') &&
+        isOptInt(data, 'displayOrder') &&
+        isValidServerTimestamp(data.publishedAt);
+    }
+
+    function isValidDownloadResource(data) {
+      return data.keys().hasAll(['cloudId', 'title', 'category', 'isVisible', 'publishedAt']) &&
+        data.keys().hasOnly([
+          'cloudId', 'title', 'category', 'fileSize', 'pdfUrl',
+          'publicationDate', 'orderNumber', 'description', 'fileType',
+          'isVisible', 'publishedAt'
+        ]) &&
+        isBoundedStr(data.cloudId, 1, 128) &&
+        isBoundedStr(data.title, 1, 500) &&
+        isBoundedStr(data.category, 1, 120) &&
+        isOptStr(data, 'fileSize', 64) &&
+        isOptStr(data, 'pdfUrl', 1000) &&
+        isOptStr(data, 'publicationDate', 64) &&
+        isOptStr(data, 'orderNumber', 120) &&
+        isOptStr(data, 'description', 2000) &&
+        isOptStr(data, 'fileType', 32) &&
+        data.isVisible is bool &&
+        isValidServerTimestamp(data.publishedAt);
+    }
+
+    function isValidYouTubeFeed(data) {
+      return data.keys().hasAll(['channelTitle', 'feedUrl', 'isVisible', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'channelTitle', 'feedUrl', 'channelId', 'isVisible', 'lastUpdated', 'timestamp'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.channelTitle, 1, 300) &&
+        isBoundedStr(data.feedUrl, 1, 1000) &&
+        isOptStr(data, 'channelId', 128) &&
+        data.isVisible is bool &&
+        isOptInt(data, 'lastUpdated') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidNewsRssFeed(data) {
+      return data.keys().hasAll(['title', 'feedUrl', 'isVisible', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'title', 'feedUrl', 'isVisible', 'lastUpdated', 'timestamp'
+        ]) &&
+        isOptInt(data, 'id') &&
+        isBoundedStr(data.title, 1, 300) &&
+        isBoundedStr(data.feedUrl, 1, 1000) &&
+        data.isVisible is bool &&
+        isOptInt(data, 'lastUpdated') &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidSalaryRule(data) {
+      return data.keys().hasAll(['daPercent', 'ruralHra', 'urbanHra', 'publishedAt']) &&
+        data.keys().hasOnly([
+          'daPercent', 'ruralHra', 'urbanHra', 'effectiveDate', 'publishedAt',
+          'currentDa', 'hraRural', 'hraUrban'
+        ]) &&
+        (data.daPercent is int || data.daPercent is float) && data.daPercent >= 0 && data.daPercent <= 500 &&
+        (data.ruralHra is int || data.ruralHra is float) && data.ruralHra >= 0 && data.ruralHra <= 100 &&
+        (data.urbanHra is int || data.urbanHra is float) && data.urbanHra >= 0 && data.urbanHra <= 100 &&
+        isOptStr(data, 'effectiveDate', 64) &&
+        isOptNumber(data, 'currentDa') &&
+        isOptNumber(data, 'hraRural') &&
+        isOptNumber(data, 'hraUrban') &&
+        isValidServerTimestamp(data.publishedAt);
+    }
+
+    function isValidAdminAuditLog(data) {
+      return data.keys().hasAll(['username', 'action', 'details', 'timestamp']) &&
+        data.keys().hasOnly(['username', 'action', 'details', 'timestamp']) &&
+        isBoundedStr(data.username, 1, 254) &&
+        isBoundedStr(data.action, 1, 120) &&
+        isBoundedStr(data.details, 0, 2000) &&
+        isValidServerTimestamp(data.timestamp);
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'role']) &&
+        data.keys().hasOnly(['email', 'role', 'displayName', 'updatedAt']) &&
+        isBoundedStr(data.email, 3, 254) &&
+        data.role in ['SUPER_ADMIN', 'ADMIN'] &&
+        isOptStr(data, 'displayName', 200) &&
+        isOptTimestamp(data, 'updatedAt');
+    }
+
+    function isValidAiConfig(data) {
+      return data.keys().hasAll(['isEnabled', 'dailyLimitPerDevice']) &&
+        data.keys().hasOnly(['isEnabled', 'dailyLimitPerDevice', 'updatedAt']) &&
+        data.isEnabled is bool &&
+        data.dailyLimitPerDevice is int && data.dailyLimitPerDevice >= 0 && data.dailyLimitPerDevice <= 1000 &&
+        isOptTimestamp(data, 'updatedAt');
+    }
+
+    function isValidFeedback(data) {
+      return data.keys().hasAll(['userId', 'message', 'createdAt']) &&
+        data.keys().hasOnly(['userId', 'message', 'category', 'createdAt']) &&
+        isBoundedStr(data.userId, 1, 128) &&
+        isBoundedStr(data.message, 1, 2000) &&
+        isOptStr(data, 'category', 64) &&
+        isValidServerTimestamp(data.createdAt);
+    }
+
+    function isValidLegacyPublicDoc(data) {
+      return data.keys().size() <= 25 &&
+        isOptStr(data, 'title', 500) &&
+        isOptStr(data, 'name', 300) &&
+        isOptTimestamp(data, 'updatedAt');
+    }
+
+    // --- 1. Core Public Content (Public Read, Admin Write) ---
+    match /notices/{noticeId} {
+      allow get: if isValidId(noticeId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(noticeId) && isValidNotice(incoming());
+      allow update: if isAdmin() && isValidId(noticeId) && isValidNotice(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(noticeId);
     }
 
     match /holiday_calendars/{calId} {
-      allow read, write: if true;
+      allow get: if isValidId(calId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(calId) && isValidHoliday(incoming());
+      allow update: if isAdmin() && isValidId(calId) && isValidHoliday(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(calId);
     }
 
     match /activities/{activityId} {
-      allow read, write: if true;
+      allow get: if isValidId(activityId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(activityId) && isValidActivity(incoming());
+      allow update: if isAdmin() && isValidId(activityId) && isValidActivity(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(activityId);
     }
 
     match /quick_portals/{portalId} {
-      allow read, write: if true;
+      allow get: if isValidId(portalId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(portalId) && isValidPortal(incoming());
+      allow update: if isAdmin() && isValidId(portalId) && isValidPortal(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(portalId);
     }
 
     match /admin_broadcasts/{broadcastId} {
-      allow read, write: if true;
+      allow get: if isValidId(broadcastId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(broadcastId) && isValidAdminBroadcast(incoming());
+      allow update: if isAdmin() && isValidId(broadcastId) && isValidAdminBroadcast(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(broadcastId);
     }
 
-    // 2. School Timing & Administrative Configurations
+    // --- 2. Version Gatekeeper & App Configurations (Public Read, Admin Write) ---
+    match /app_meta/{metaId} {
+      allow get: if isValidId(metaId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(metaId) && isValidAppMeta(incoming());
+      allow update: if isAdmin() && isValidId(metaId) && isValidAppMeta(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(metaId);
+    }
+
     match /school_config/{docId} {
-      allow read, write: if true;
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(docId) && isValidSchoolConfig(incoming());
+      allow update: if isAdmin() && isValidId(docId) && isValidSchoolConfig(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(docId);
     }
 
     match /whatsapp_config/{docId} {
-      allow read, write: if true;
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(docId) && isValidWhatsAppConfig(incoming());
+      allow update: if isAdmin() && isValidId(docId) && isValidWhatsAppConfig(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(docId);
     }
 
     match /app_configs/{docId} {
-      allow read, write: if true;
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(docId) && isValidGoogleDriveConfig(incoming());
+      allow update: if isAdmin() && isValidId(docId) && isValidGoogleDriveConfig(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(docId);
     }
 
     match /app_config/{docId} {
-      allow read, write: if true;
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(docId) && isValidAppConfigCard(incoming());
+      allow update: if isAdmin() && isValidId(docId) && isValidAppConfigCard(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(docId);
     }
 
-    match /public_config/{docId} {
-      allow read, write: if true;
-    }
-
-    match /app_versions/{docId} {
-      allow read, write: if true;
-    }
-
-    // 3. Educational Features, Banners & Links
+    // --- 3. Educational Features, Banners & Portals ---
     match /feature_boxes/{boxId} {
-      allow read, write: if true;
+      allow get: if isValidId(boxId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(boxId) && isValidFeatureBox(incoming());
+      allow update: if isAdmin() && isValidId(boxId) && isValidFeatureBox(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(boxId);
     }
 
     match /home_top_links/{linkId} {
-      allow read, write: if true;
+      allow get: if isValidId(linkId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(linkId) && isValidHomeTopLink(incoming());
+      allow update: if isAdmin() && isValidId(linkId) && isValidHomeTopLink(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(linkId);
     }
 
     match /complaint_options/{optId} {
-      allow read, write: if true;
+      allow get: if isValidId(optId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(optId) && isValidComplaintOption(incoming());
+      allow update: if isAdmin() && isValidId(optId) && isValidComplaintOption(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(optId);
     }
 
     match /financial_services/{serviceId} {
-      allow read, write: if true;
+      allow get: if isValidId(serviceId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(serviceId) && isValidFinancialService(incoming());
+      allow update: if isAdmin() && isValidId(serviceId) && isValidFinancialService(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(serviceId);
     }
 
     match /promo_banners/{bannerId} {
-      allow read, write: if true;
+      allow get: if isValidId(bannerId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(bannerId) && isValidPromoBanner(incoming());
+      allow update: if isAdmin() && isValidId(bannerId) && isValidPromoBanner(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(bannerId);
     }
 
-    match /banners/{bannerId} {
-      allow read, write: if true;
-    }
-
-    // 4. News, Videos & Feeds
+    // --- 4. News, Videos, Downloads & RSS Feeds ---
     match /news_articles/{newsId} {
-      allow read, write: if true;
+      allow get: if isValidId(newsId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(newsId) && isValidNewsArticle(incoming());
+      allow update: if isAdmin() && isValidId(newsId) && isValidNewsArticle(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(newsId);
     }
 
     match /video_tutorials/{videoId} {
-      allow read, write: if true;
+      allow get: if isValidId(videoId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(videoId) && isValidVideoTutorial(incoming());
+      allow update: if isAdmin() && isValidId(videoId) && isValidVideoTutorial(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(videoId);
     }
 
     match /download_resources/{resId} {
-      allow read, write: if true;
+      allow get: if isValidId(resId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(resId) && isValidDownloadResource(incoming());
+      allow update: if isAdmin() && isValidId(resId) && isValidDownloadResource(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(resId);
     }
 
     match /youtube_feeds/{feedId} {
-      allow read, write: if true;
+      allow get: if isValidId(feedId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(feedId) && isValidYouTubeFeed(incoming());
+      allow update: if isAdmin() && isValidId(feedId) && isValidYouTubeFeed(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(feedId);
     }
 
     match /news_rss_feeds/{feedId} {
-      allow read, write: if true;
+      allow get: if isValidId(feedId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(feedId) && isValidNewsRssFeed(incoming());
+      allow update: if isAdmin() && isValidId(feedId) && isValidNewsRssFeed(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(feedId);
     }
 
-    // 5. Salary Rules & History
+    // --- 5. Salary Rules ---
     match /salary_rules/{ruleId} {
-      allow read, write: if true;
+      allow get: if isValidId(ruleId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(ruleId) && isValidSalaryRule(incoming());
+      allow update: if isAdmin() && isValidId(ruleId) && isValidSalaryRule(incoming()) &&
+        incoming().diff(existing()).affectedKeys().size() > 0;
+      allow delete: if isAdmin() && isValidId(ruleId);
     }
 
-    match /salary_rule_versions/{verId} {
-      allow read, write: if true;
-    }
-
-    // 6. User Feedback, AI & Audit Logs
+    // --- 6. Sensitive / Restricted / Audit / User Feedback ---
     match /admin_audit_logs/{logId} {
-      allow read, write: if true;
-    }
-
-    match /audit_logs/{logId} {
-      allow read, write: if true;
-    }
-
-    match /feedback/{feedbackId} {
-      allow read, write: if true;
-    }
-
-    match /ai_config/{configId} {
-      allow read, write: if true;
-    }
-
-    match /ai_usage/{deviceId} {
-      allow read, write: if true;
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) && isValidAdminAuditLog(incoming());
+      allow update, delete: if false;
     }
 
     match /admin_users/{adminUid} {
-      allow read, write: if true;
+      allow get: if isValidId(adminUid) && (isAdmin() || (isSignedIn() && request.auth.uid == adminUid));
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(adminUid) && isValidAdminUser(incoming());
+      allow update: if isAdmin() && isValidId(adminUid) && isValidAdminUser(incoming()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'role', 'displayName', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(adminUid);
+    }
+
+    match /ai_config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(configId) && isValidAiConfig(incoming());
+      allow update: if isAdmin() && isValidId(configId) && isValidAiConfig(incoming()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isEnabled', 'dailyLimitPerDevice', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(configId);
+    }
+
+    match /feedback/{feedbackId} {
+      allow get: if isValidId(feedbackId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(feedbackId) && isValidFeedback(incoming()) &&
+        incoming().userId == request.auth.uid;
+      allow update: if isAdmin() && isValidId(feedbackId) && isValidFeedback(incoming()) &&
+        incoming().userId == existing().userId && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(feedbackId);
+    }
+
+    match /audit_logs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    match /ai_usage/{deviceId} {
+      allow read, write: if false;
     }
 
     match /notification_history/{notifId} {
-      allow read, write: if true;
+      allow get: if isAdmin() && isValidId(notifId);
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    // --- 7. Legacy Collections (Public Read, Admin Write) ---
+    match /notice_categories/{catId} {
+      allow get: if isValidId(catId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(catId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(catId);
+    }
+
+    match /public_config/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(docId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(docId);
+    }
+
+    match /app_versions/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(docId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(docId);
+    }
+
+    match /banners/{bannerId} {
+      allow get: if isValidId(bannerId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(bannerId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(bannerId);
+    }
+
+    match /salary_rule_versions/{verId} {
+      allow get: if isValidId(verId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(verId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(verId);
     }
 
     match /application_templates/{templateId} {
-      allow read, write: if true;
+      allow get: if isValidId(templateId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(templateId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(templateId);
     }
 
     match /knowledge_documents/{docId} {
-      allow read, write: if true;
-    }
-
-    // Catch-all to allow all remaining and future collections
-    match /{document=**} {
-      allow read, write: if true;
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create, update: if isAdmin() && isValidId(docId) && isValidLegacyPublicDoc(incoming());
+      allow delete: if isAdmin() && isValidId(docId);
     }
   }
 }

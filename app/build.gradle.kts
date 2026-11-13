@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.time.Duration
 
 plugins {
   alias(libs.plugins.android.application)
@@ -22,8 +23,14 @@ android {
     val r2WorkerBaseUrl = (project.findProperty("R2_WORKER_BASE_URL") as? String)
       ?.trim()
       ?.takeIf { it.isNotEmpty() }
-      ?: "https://shikshak-sathi-r2-worker.workers.dev"
+      ?: "https://shikshak-sathi-r2-worker.satyamprakash100.workers.dev"
     buildConfigField("String", "R2_WORKER_BASE_URL", "\"$r2WorkerBaseUrl\"")
+
+    val r2PublicCustomDomain = (project.findProperty("R2_PUBLIC_CUSTOM_DOMAIN") as? String)
+      ?.trim()
+      ?.trimEnd('/')
+      .orEmpty()
+    buildConfigField("String", "R2_PUBLIC_CUSTOM_DOMAIN", "\"$r2PublicCustomDomain\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -111,10 +118,12 @@ dependencies {
   implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.messaging)
 
   // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
   // Sign-In via Credential Manager:
@@ -146,4 +155,12 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+}
+
+tasks.withType<Test> {
+  failFast = true
+  timeout.set(Duration.ofMinutes(2))
+  testLogging {
+    events("passed", "failed", "skipped")
+  }
 }

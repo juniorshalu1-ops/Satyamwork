@@ -4,11 +4,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -35,15 +38,18 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -83,9 +89,12 @@ import com.example.ui.theme.Navy800
 import com.example.ui.theme.Navy900
 import com.example.ui.theme.PureWhite
 import com.example.ui.theme.Teal700
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class R2UploadMode {
     IMAGE_ONLY,
@@ -98,6 +107,8 @@ enum class R2UploadMode {
  * Strictly validates that the signed-in Google account is satyamprakash100@gmail.com.
  */
 object AdminGoogleAuthHelper {
+    private const val TAG = "AdminGoogleAuthHelper"
+
     suspend fun signInWithGoogle(
         context: Context,
         adminViewModel: AdminViewModel
@@ -108,12 +119,34 @@ object AdminGoogleAuthHelper {
         return try {
             val credentialManager = CredentialManager.create(context)
             val webClientId = context.getString(R.string.default_web_client_id)
-            val googleOption = GetSignInWithGoogleOption.Builder(webClientId).build()
-            val request = GetCredentialRequest.Builder()
-                .addCredentialOption(googleOption)
+
+            // Fast path: check previously authorized Google accounts first (near-instant / auto-select)
+            val authorizedOption = GetGoogleIdOption.Builder()
+                .setFilterByAuthorizedAccounts(true)
+                .setServerClientId(webClientId)
+                .setAutoSelectEnabled(true)
                 .build()
 
-            val result = credentialManager.getCredential(request = request, context = context)
+            val result = try {
+                credentialManager.getCredential(
+                    request = GetCredentialRequest.Builder()
+                        .addCredentialOption(authorizedOption)
+                        .build(),
+                    context = context
+                )
+            } catch (cancel: GetCredentialCancellationException) {
+                throw cancel
+            } catch (firstErr: GetCredentialException) {
+                Log.d(TAG, "Authorized account fast-path skipped, showing Google Sign-In picker: ${firstErr.type}")
+                val interactiveOption = GetSignInWithGoogleOption.Builder(webClientId).build()
+                credentialManager.getCredential(
+                    request = GetCredentialRequest.Builder()
+                        .addCredentialOption(interactiveOption)
+                        .build(),
+                    context = context
+                )
+            }
+
             val credential = result.credential
             if (credential is CustomCredential &&
                 credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
@@ -125,19 +158,26 @@ object AdminGoogleAuthHelper {
             } else {
                 Result.failure(IllegalStateException("Google ID टोकन प्राप्त नहीं हो सका।"))
             }
-        } catch (_: GetCredentialCancellationException) {
+        } catch (cancel: GetCredentialCancellationException) {
+            Log.i(TAG, "User cancelled Google sign-in", cancel)
             Result.failure(IllegalStateException("Google साइन-इन रद्द किया गया।"))
         } catch (e: GetCredentialException) {
+            Log.w(TAG, "Credential Manager sign-in error: ${e.type}", e)
             Result.failure(IllegalStateException("Google खाता सत्यापन त्रुटि: ${e.message ?: "पुनः प्रयास करें"}"))
         } catch (e: Exception) {
+            Log.e(TAG, "Unexpected sign-in error", e)
             Result.failure(e)
         }
     }
 
     suspend fun clearCredentialSession(context: Context) {
-        runCatching {
-            val credentialManager = CredentialManager.create(context)
-            credentialManager.clearCredentialState(ClearCredentialStateRequest())
+        withContext(NonCancellable) {
+            runCatching {
+                val credentialManager = CredentialManager.create(context)
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            }.onFailure { e ->
+                Log.w(TAG, "clearCredentialState warning", e)
+            }
         }
     }
 }
@@ -262,7 +302,7 @@ fun R2UploadPickerRow(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (existingUrl.contains("/files/") || existingUrl.contains(".r2.dev")) {
+                            text = if (R2Config.isR2ManagedUrl(context, existingUrl)) {
                                 "नया PDF बदलें"
                             } else {
                                 "PDF अपलोड (R2)"
@@ -299,7 +339,7 @@ fun R2UploadPickerRow(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (existingUrl.contains("/files/") || existingUrl.contains(".r2.dev")) {
+                            text = if (R2Config.isR2ManagedUrl(context, existingUrl)) {
                                 "इमेज बदलें"
                             } else {
                                 "फोटो अपलोड (R2)"
@@ -347,17 +387,33 @@ fun AdminR2StorageTab(
     listState: LazyListState = rememberLazyListState()
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val currentWorkerUrl by viewModel.r2WorkerUrl.collectAsState()
     val files by viewModel.r2Files.collectAsState()
     val isLoading by viewModel.isLoadingR2.collectAsState()
     val statusMsg by viewModel.r2StatusMessage.collectAsState()
+    val errorMsg by viewModel.r2ErrorMessage.collectAsState()
+    val authRequired by viewModel.r2AuthRequired.collectAsState()
     val health by viewModel.r2HealthStatus.collectAsState()
 
     var workerUrlInput by remember(currentWorkerUrl) { mutableStateOf(currentWorkerUrl) }
+    var isReAuthenticating by remember { mutableStateOf(false) }
+
+    val r2Folders = remember {
+        listOf(
+            "banners" to "बैनर",
+            "notices" to "आदेश",
+            "downloads" to "डाउनलोड",
+            "news" to "समाचार",
+            "misc" to "अन्य"
+        )
+    }
+    var selectedUploadFolder by remember { mutableStateOf("banners") }
+    var uploadTitleHint by remember { mutableStateOf("") }
+    var lastUploadedUrl by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        viewModel.checkR2Health()
-        viewModel.loadR2Files()
+        viewModel.refreshR2Dashboard()
     }
 
     LazyColumn(
@@ -426,6 +482,83 @@ fun AdminR2StorageTab(
             }
         }
 
+        if (!errorMsg.isNullOrBlank() || authRequired) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.Top) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "R2 त्रुटि",
+                                tint = Color(0xFFC62828),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Cloudflare R2 सिंक समस्या",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp,
+                                    color = Color(0xFFB71C1C)
+                                )
+                                Text(
+                                    text = errorMsg ?: "Google एडमिन टोकन सत्यापित नहीं हो सका। कृपया पुनः साइन-इन करें।",
+                                    fontSize = 11.5.sp,
+                                    color = Color(0xFFC62828)
+                                )
+                            }
+                        }
+                        if (authRequired) {
+                            Button(
+                                onClick = {
+                                    isReAuthenticating = true
+                                    scope.launch {
+                                        val res = AdminGoogleAuthHelper.signInWithGoogle(context, viewModel)
+                                        isReAuthenticating = false
+                                        res.onSuccess {
+                                            Toast.makeText(context, "Google सत्यापन सफल! R2 सिंक हो रहा है...", Toast.LENGTH_SHORT).show()
+                                            viewModel.refreshR2Dashboard()
+                                        }.onFailure { err ->
+                                            Toast.makeText(context, err.message ?: "Google साइन-इन विफल", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                },
+                                enabled = !isReAuthenticating,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB71C1C)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("r2_google_reauth_btn")
+                            ) {
+                                if (isReAuthenticating) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = PureWhite
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = "Google पुनः साइन-इन",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Google से पुनः साइन-इन करें", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             ElevatedCard(
                 shape = RoundedCornerShape(12.dp),
@@ -460,9 +593,8 @@ fun AdminR2StorageTab(
                             onClick = {
                                 val saved = viewModel.saveR2WorkerUrl(workerUrlInput)
                                 workerUrlInput = saved
-                                viewModel.checkR2Health()
-                                viewModel.loadR2Files()
                             },
+                            enabled = !isLoading,
                             colors = ButtonDefaults.buttonColors(containerColor = Navy800),
                             modifier = Modifier
                                 .weight(1f)
@@ -473,9 +605,9 @@ fun AdminR2StorageTab(
                         }
                         OutlinedButton(
                             onClick = {
-                                viewModel.checkR2Health()
-                                viewModel.loadR2Files()
+                                viewModel.refreshR2Dashboard()
                             },
+                            enabled = !isLoading,
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
                                 .testTag("r2_refresh_files_btn")
@@ -486,17 +618,40 @@ fun AdminR2StorageTab(
                         }
                     }
 
-                    OutlinedButton(
-                        onClick = { viewModel.publishLibraryManifestToR2() },
-                        enabled = !isLoading,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .testTag("r2_publish_manifest_btn")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp), tint = Teal700)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Static JSON Catalog Manifest प्रकाशित करें (R2)", fontSize = 12.sp, color = Navy900)
+                        OutlinedButton(
+                            onClick = {
+                                val resetUrl = viewModel.resetR2WorkerUrl()
+                                workerUrlInput = resetUrl
+                            },
+                            enabled = !isLoading,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("r2_reset_url_btn")
+                        ) {
+                            Text("डिफ़ॉल्ट URL", fontSize = 11.5.sp, color = Navy900)
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.publishLibraryManifestToR2() },
+                            enabled = !isLoading,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("r2_publish_manifest_btn")
+                        ) {
+                            Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(16.dp), tint = Teal700)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Catalog Manifest प्रकाशित करें",
+                                fontSize = 11.5.sp,
+                                color = Navy900,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
 
                     if (isLoading) {
@@ -506,9 +661,106 @@ fun AdminR2StorageTab(
                         Text(
                             text = statusMsg.orEmpty(),
                             fontSize = 11.5.sp,
-                            color = Navy800,
+                            color = Teal700,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                }
+            }
+        }
+
+        item {
+            ElevatedCard(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.elevatedCardColors(containerColor = PureWhite),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Cloudflare R2 में सीधे फाइल अपलोड करें",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = Navy900
+                    )
+                    Text(
+                        text = "अपलोड के लिए फ़ोल्डर चुनें और PDF या फोटो सीधे R2 CDN में अपलोड करें:",
+                        fontSize = 11.sp,
+                        color = Color.DarkGray
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        r2Folders.forEach { (folderKey, label) ->
+                            FilterChip(
+                                selected = selectedUploadFolder == folderKey,
+                                onClick = { selectedUploadFolder = folderKey },
+                                label = { Text("$label ($folderKey)", fontSize = 11.sp) },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("r2_folder_chip_$folderKey")
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = uploadTitleHint,
+                        onValueChange = { uploadTitleHint = it },
+                        label = { Text("फाइल का शीर्षक / नाम (वैकल्पिक)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("r2_direct_upload_title_input")
+                    )
+                    R2UploadPickerRow(
+                        adminViewModel = viewModel,
+                        folder = selectedUploadFolder,
+                        titleHint = uploadTitleHint.ifBlank { selectedUploadFolder },
+                        existingUrl = lastUploadedUrl,
+                        mode = R2UploadMode.PDF_OR_IMAGE,
+                        testTagPrefix = "admin_r2_tab",
+                        onUploaded = { uploaded ->
+                            lastUploadedUrl = uploaded.url
+                            uploadTitleHint = ""
+                            viewModel.loadR2Files()
+                        }
+                    )
+                    if (lastUploadedUrl.isNotBlank()) {
+                        Surface(
+                            color = Color(0xFFE8F5E9),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "CDN लिंक: $lastUploadedUrl",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFF1B5E20),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("R2 URL", lastUploadedUrl))
+                                        Toast.makeText(context, "CDN लिंक कॉपी हो गया!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    modifier = Modifier.testTag("r2_copy_last_uploaded_btn")
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = "CDN लिंक कॉपी करें", tint = Color(0xFF1B5E20))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -550,7 +802,11 @@ fun AdminR2StorageTab(
                         Icon(Icons.Default.Security, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(32.dp))
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "कोई R2 फाइल सूचीबद्ध नहीं है या Worker URL अभी सेट नहीं है।",
+                            text = if (!errorMsg.isNullOrBlank()) {
+                                "सिंक त्रुटि के कारण R2 फाइल सूची लोड नहीं हुई। ऊपर त्रुटि जांचें।"
+                            } else {
+                                "कोई R2 फाइल सूचीबद्ध नहीं है — ऊपर से नई फाइल अपलोड करें या Catalog Manifest प्रकाशित करें।"
+                            },
                             fontSize = 12.sp,
                             color = Color.Gray
                         )

@@ -336,10 +336,10 @@ interface ContentDao {
     // -------------------------------------------------------------
     // PROMO BANNERS
     // -------------------------------------------------------------
-    @Query("SELECT * FROM promo_banners WHERE isActive = 1 ORDER BY orderIndex ASC")
+    @Query("SELECT * FROM promo_banners ORDER BY orderIndex ASC")
     fun getAllBanners(): Flow<List<com.example.database.entities.PromoBannerEntity>>
 
-    @Query("SELECT * FROM promo_banners WHERE isActive = 1 ORDER BY orderIndex ASC")
+    @Query("SELECT * FROM promo_banners ORDER BY orderIndex ASC")
     suspend fun getAllBannersOnce(): List<com.example.database.entities.PromoBannerEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -417,38 +417,46 @@ interface ContentDao {
 
     @Transaction
     suspend fun syncVideosFromCloud(videosList: List<com.example.database.entities.VideoTutorialEntity>) {
-        if (videosList.isNotEmpty()) {
-            val existing = getAllVideosOnce()
-            val toInsert = mutableListOf<com.example.database.entities.VideoTutorialEntity>()
-            for (v in videosList) {
-                val match = existing.find {
-                    (v.id > 0 && it.id == v.id) ||
-                    (v.youtubeId.isNotBlank() && it.youtubeId == v.youtubeId) ||
-                    (v.youtubeUrl.isNotBlank() && it.youtubeUrl.trim() == v.youtubeUrl.trim()) ||
-                    (it.title.trim().equals(v.title.trim(), ignoreCase = true))
-                }
-                if (match != null) {
-                    val changed = match.title != v.title ||
-                        match.category != v.category ||
-                        match.youtubeUrl != v.youtubeUrl ||
-                        match.youtubeId != v.youtubeId ||
-                        match.thumbnailUrl != v.thumbnailUrl ||
-                        match.duration != v.duration ||
-                        match.description != v.description ||
-                        match.isPinned != v.isPinned ||
-                        match.isFeaturedOnHome != v.isFeaturedOnHome ||
-                        match.displayOrder != v.displayOrder
-                    if (changed) {
-                        updateVideo(v.copy(id = match.id))
-                    }
-                } else {
-                    toInsert.add(v.copy(id = 0L))
-                }
+        val existing = getAllVideosOnce()
+        val matchedIds = mutableSetOf<Long>()
+        val toInsert = mutableListOf<com.example.database.entities.VideoTutorialEntity>()
+        for (v in videosList) {
+            val match = existing.find { local ->
+                local.id !in matchedIds && (
+                    (v.id > 0 && local.id == v.id) ||
+                    (v.youtubeId.isNotBlank() && local.youtubeId == v.youtubeId) ||
+                    (v.youtubeUrl.isNotBlank() && local.youtubeUrl.trim() == v.youtubeUrl.trim()) ||
+                    (local.title.trim().equals(v.title.trim(), ignoreCase = true))
+                )
             }
-            if (toInsert.isNotEmpty()) {
-                insertAllVideos(toInsert)
+            if (match != null) {
+                matchedIds.add(match.id)
+                val changed = match.title != v.title ||
+                    match.category != v.category ||
+                    match.youtubeUrl != v.youtubeUrl ||
+                    match.youtubeId != v.youtubeId ||
+                    match.thumbnailUrl != v.thumbnailUrl ||
+                    match.duration != v.duration ||
+                    match.description != v.description ||
+                    match.isPinned != v.isPinned ||
+                    match.isFeaturedOnHome != v.isFeaturedOnHome ||
+                    match.displayOrder != v.displayOrder
+                if (changed) {
+                    updateVideo(v.copy(id = match.id))
+                }
+            } else {
+                toInsert.add(v.copy(id = 0L))
             }
         }
+        for (local in existing) {
+            if (local.id !in matchedIds && local.duration != "यूट्यूब") {
+                deleteVideo(local)
+            }
+        }
+        if (toInsert.isNotEmpty()) {
+            insertAllVideos(toInsert)
+        }
+        removeDuplicateVideos()
     }
 
     // -------------------------------------------------------------
@@ -589,36 +597,43 @@ interface ContentDao {
 
     @Transaction
     suspend fun syncNewsFromCloud(newsList: List<com.example.database.entities.NewsArticleEntity>) {
-        if (newsList.isNotEmpty()) {
-            val existing = getAllNewsOnce()
-            val toInsert = mutableListOf<com.example.database.entities.NewsArticleEntity>()
-            for (n in newsList) {
-                val match = existing.find { it.title.trim().equals(n.title.trim(), ignoreCase = true) }
-                if (match != null) {
-                    val changed = match.title != n.title ||
-                        match.summary != n.summary ||
-                        match.content != n.content ||
-                        match.category != n.category ||
-                        match.publishedAt != n.publishedAt ||
-                        match.source != n.source ||
-                        match.sourceUrl != n.sourceUrl ||
-                        match.imageUrl != n.imageUrl ||
-                        match.isPinned != n.isPinned ||
-                        match.pinOrder != n.pinOrder ||
-                        match.isBreaking != n.isBreaking ||
-                        match.isVisible != n.isVisible
-                    if (changed) {
-                        updateNews(n.copy(id = match.id))
-                    }
-                } else {
-                    toInsert.add(n.copy(id = 0L))
+        val existing = getAllNewsOnce()
+        val matchedIds = mutableSetOf<Long>()
+        val toInsert = mutableListOf<com.example.database.entities.NewsArticleEntity>()
+        for (n in newsList) {
+            val match = existing.find { local ->
+                local.id !in matchedIds && local.title.trim().equals(n.title.trim(), ignoreCase = true)
+            }
+            if (match != null) {
+                matchedIds.add(match.id)
+                val changed = match.title != n.title ||
+                    match.summary != n.summary ||
+                    match.content != n.content ||
+                    match.category != n.category ||
+                    match.publishedAt != n.publishedAt ||
+                    match.source != n.source ||
+                    match.sourceUrl != n.sourceUrl ||
+                    match.imageUrl != n.imageUrl ||
+                    match.isPinned != n.isPinned ||
+                    match.pinOrder != n.pinOrder ||
+                    match.isBreaking != n.isBreaking ||
+                    match.isVisible != n.isVisible
+                if (changed) {
+                    updateNews(n.copy(id = match.id))
                 }
+            } else {
+                toInsert.add(n.copy(id = 0L))
             }
-            if (toInsert.isNotEmpty()) {
-                insertAllNews(toInsert)
-            }
-            removeDuplicateNews()
         }
+        for (local in existing) {
+            if (local.id !in matchedIds && local.category != "लाइव RSS") {
+                deleteNews(local)
+            }
+        }
+        if (toInsert.isNotEmpty()) {
+            insertAllNews(toInsert)
+        }
+        removeDuplicateNews()
     }
 
     // -------------------------------------------------------------

@@ -31,11 +31,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AdminPanelSettings
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachMoney
@@ -483,7 +483,7 @@ fun AdminDashboardContent(
                         modifier = Modifier.testTag("admin_header_back_btn")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ArrowBack,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = if (activeAdminSubSection != null) "Back to Admin Dashboard" else "Back to User App",
                             tint = PureWhite
                         )
@@ -514,8 +514,13 @@ fun AdminDashboardContent(
                             viewModel.syncAllDataToCloud { success ->
                                 Toast.makeText(
                                     context,
-                                    if (success) "क्लाउड पर सभी डेटा सफलतापूर्वक सिंक हुआ!" else "सिंक विफल: इंटरनेट जांचें",
-                                    Toast.LENGTH_SHORT
+                                    if (success) {
+                                        "क्लाउड पर सभी डेटा सफलतापूर्वक सिंक हुआ!"
+                                    } else {
+                                        viewModel.syncStatusMessage.value
+                                            ?: "सिंक विफल: इंटरनेट या Admin लॉगिन जांचें"
+                                    },
+                                    Toast.LENGTH_LONG
                                 ).show()
                             }
                         },
@@ -557,9 +562,16 @@ fun AdminDashboardContent(
         // Real-Time Sync Action Bar
         val isSyncing by viewModel.isSyncing.collectAsState()
         val syncMessage by viewModel.syncStatusMessage.collectAsState()
+        val isCloudWarning = syncMessage?.startsWith("चेतावनी:") == true
+
+        LaunchedEffect(syncMessage) {
+            if (isCloudWarning && !syncMessage.isNullOrBlank()) {
+                Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
+            }
+        }
 
         Surface(
-            color = Color(0xFF1E3A5F),
+            color = if (isCloudWarning) Color(0xFF7F1D1D) else Color(0xFF1E3A5F),
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
@@ -571,16 +583,16 @@ fun AdminDashboardContent(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "डेटा सर्वर सिंक (Cloud Real-Time Sync)",
+                        text = if (isCloudWarning) "क्लाउड सिंक चेतावनी" else "डेटा सर्वर सिंक (Cloud Real-Time Sync)",
                         color = PureWhite,
                         fontWeight = FontWeight.Bold,
                         fontSize = 11.sp
                     )
                     Text(
                         text = syncMessage ?: "अपलोड के बाद तुरंत सभी शिक्षकों को डेटा भेजने हेतु सिंक दबाएं",
-                        color = Gold100,
+                        color = if (isCloudWarning) Color(0xFFFFCDD2) else Gold100,
                         fontSize = 10.sp,
-                        maxLines = 1
+                        maxLines = 2
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
@@ -589,8 +601,13 @@ fun AdminDashboardContent(
                         viewModel.syncAllDataToCloud { success ->
                             Toast.makeText(
                                 context,
-                                if (success) "क्लाउड पर सभी डेटा सफलतापूर्वक सिंक हुआ!" else "सिंक विफल: इंटरनेट जांचें",
-                                Toast.LENGTH_SHORT
+                                if (success) {
+                                    "क्लाउड पर सभी डेटा सफलतापूर्वक सिंक हुआ!"
+                                } else {
+                                    viewModel.syncStatusMessage.value
+                                        ?: "सिंक विफल: इंटरनेट या Admin लॉगिन जांचें"
+                                },
+                                Toast.LENGTH_LONG
                             ).show()
                         }
                     },

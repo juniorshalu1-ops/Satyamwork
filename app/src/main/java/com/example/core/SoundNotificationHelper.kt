@@ -10,9 +10,6 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -101,41 +98,10 @@ object SoundNotificationHelper {
             recentAlertTimestamps.entries.removeIf { currentTime - it.value > 120_000L }
         }
 
-        // 1. Ensure channel is ready
+        // 1. Ensure channel is ready (sound & vibration are configured on the NotificationChannel for API 26+)
         initializeChannel(appContext)
 
-        // 2. Audible notification tone & vibration
-        try {
-            val alertSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            val ringtone = RingtoneManager.getRingtone(appContext, alertSoundUri)
-            ringtone?.play()
-        } catch (e: Exception) {
-            Log.w(TAG, "Ringtone play error", e)
-        }
-
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vibratorManager = appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                val vibrator = vibratorManager?.defaultVibrator
-                val pattern = longArrayOf(0, 400, 200, 400)
-                vibrator?.vibrate(VibrationEffect.createWaveform(pattern, -1))
-            } else {
-                @Suppress("DEPRECATION")
-                val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                val pattern = longArrayOf(0, 400, 200, 400)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator?.vibrate(VibrationEffect.createWaveform(pattern, -1))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator?.vibrate(pattern, -1)
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Vibration error", e)
-        }
-
-        // 3. Post High-Priority Lock-Screen & Status Bar System Notification
+        // 2. Post High-Priority Lock-Screen & Status Bar System Notification
         try {
             val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                 ?: return
