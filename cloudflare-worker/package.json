@@ -1,0 +1,14 @@
+{
+  "name": "shikshak-sathi-r2-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker + R2 file storage & CDN backend for Shikshak Sathi Bihar Android app",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

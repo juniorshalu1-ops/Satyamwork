@@ -1,0 +1,19 @@
+name = "shikshak-sathi-r2-worker"
+main = "src/index.js"
+compatibility_date = "2026-03-01"
+workers_dev = true
+
+# Cloudflare R2 Bucket Binding (No R2 Access Key / Secret Key needed in code!)
+# Before deploying:
+#   npx wrangler r2 bucket create shikshak-sathi-media
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "shikshak-sathi-media"
+
+[vars]
+FIREBASE_PROJECT_ID = "gen-lang-client-0268244143"
+ADMIN_EMAILS = "satyamprakash100@gmail.com"
+# Optional: If you enable R2.dev public access on the bucket, set its URL below
+# (e.g. "https://pub-xxxxxxxxxxxxxxxx.r2.dev") so direct public reads bypass Worker requests completely.
+# If left empty, public reads are served and edge-cached via Worker /files/<key>.
+R2_PUBLIC_BASE_URL = ""

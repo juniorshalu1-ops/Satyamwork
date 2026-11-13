@@ -1,0 +1,152 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Core Public & Admin Content Collections (जैसे विभागीय आदेश)
+    match /notices/{noticeId} {
+      allow read, write: if true;
+    }
+
+    match /notice_categories/{catId} {
+      allow read, write: if true;
+    }
+
+    match /holiday_calendars/{calId} {
+      allow read, write: if true;
+    }
+
+    match /activities/{activityId} {
+      allow read, write: if true;
+    }
+
+    match /quick_portals/{portalId} {
+      allow read, write: if true;
+    }
+
+    match /admin_broadcasts/{broadcastId} {
+      allow read, write: if true;
+    }
+
+    // 2. School Timing & Administrative Configurations
+    match /school_config/{docId} {
+      allow read, write: if true;
+    }
+
+    match /whatsapp_config/{docId} {
+      allow read, write: if true;
+    }
+
+    match /app_configs/{docId} {
+      allow read, write: if true;
+    }
+
+    match /app_config/{docId} {
+      allow read, write: if true;
+    }
+
+    match /public_config/{docId} {
+      allow read, write: if true;
+    }
+
+    match /app_versions/{docId} {
+      allow read, write: if true;
+    }
+
+    // 3. Educational Features, Banners & Links
+    match /feature_boxes/{boxId} {
+      allow read, write: if true;
+    }
+
+    match /home_top_links/{linkId} {
+      allow read, write: if true;
+    }
+
+    match /complaint_options/{optId} {
+      allow read, write: if true;
+    }
+
+    match /financial_services/{serviceId} {
+      allow read, write: if true;
+    }
+
+    match /promo_banners/{bannerId} {
+      allow read, write: if true;
+    }
+
+    match /banners/{bannerId} {
+      allow read, write: if true;
+    }
+
+    // 4. News, Videos & Feeds
+    match /news_articles/{newsId} {
+      allow read, write: if true;
+    }
+
+    match /video_tutorials/{videoId} {
+      allow read, write: if true;
+    }
+
+    match /download_resources/{resId} {
+      allow read, write: if true;
+    }
+
+    match /youtube_feeds/{feedId} {
+      allow read, write: if true;
+    }
+
+    match /news_rss_feeds/{feedId} {
+      allow read, write: if true;
+    }
+
+    // 5. Salary Rules & History
+    match /salary_rules/{ruleId} {
+      allow read, write: if true;
+    }
+
+    match /salary_rule_versions/{verId} {
+      allow read, write: if true;
+    }
+
+    // 6. User Feedback, AI & Audit Logs
+    match /admin_audit_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    match /audit_logs/{logId} {
+      allow read, write: if true;
+    }
+
+    match /feedback/{feedbackId} {
+      allow read, write: if true;
+    }
+
+    match /ai_config/{configId} {
+      allow read, write: if true;
+    }
+
+    match /ai_usage/{deviceId} {
+      allow read, write: if true;
+    }
+
+    match /admin_users/{adminUid} {
+      allow read, write: if true;
+    }
+
+    match /notification_history/{notifId} {
+      allow read, write: if true;
+    }
+
+    match /application_templates/{templateId} {
+      allow read, write: if true;
+    }
+
+    match /knowledge_documents/{docId} {
+      allow read, write: if true;
+    }
+
+    // Catch-all to allow all remaining and future collections
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Shikshak Sathi",
+  "description": "Bihar Teacher Digital Portal: Salary Calculator, Dynamic DA/HRA, Activities, Portals, Encrypted Backup, Updates, and Smart Tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

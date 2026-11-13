@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Golden Knowledge Halo/Sun behind -->
+    <path
+        android:fillColor="#33F3C64F"
+        android:pathData="M54,28 A24,24 0 1,0 54,76 A24,24 0 1,0 54,28 Z" />
+
+    <!-- Open Book Left Page -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M52,48 C44,44 34,44 26,46 L26,74 C34,72 44,72 52,76 Z" />
+
+    <!-- Open Book Right Page -->
+    <path
+        android:fillColor="#F0F4F8"
+        android:pathData="M56,48 C64,44 74,44 82,46 L82,74 C74,72 64,72 56,76 Z" />
+
+    <!-- Book Spine & Binding Lines -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M52.5,47 L55.5,47 L55.5,77 L52.5,77 Z" />
+    <path
+        android:fillColor="#1B3B6F"
+        android:pathData="M31,52 L48,52 L48,54 L31,54 Z M31,57 L48,57 L48,59 L31,59 Z M31,62 L45,62 L45,64 L31,64 Z" />
+    <path
+        android:fillColor="#1B3B6F"
+        android:pathData="M60,52 L77,52 L77,54 L60,54 Z M60,57 L77,57 L77,59 L60,59 Z M63,62 L77,62 L77,64 L63,64 Z" />
+
+    <!-- Auspicious Knowledge Flame / Diya / Pen Torch in Gold -->
+    <path
+        android:fillColor="#F3C64F"
+        android:pathData="M54,26 C57,32 60,36 60,40 C60,43.3 57.3,46 54,46 C50.7,46 48,43.3 48,40 C48,36 51,32 54,26 Z" />
+    <path
+        android:fillColor="#FF7A00"
+        android:pathData="M54,32 C55.5,35 57,37.5 57,40 C57,41.7 55.7,43 54,43 C52.3,43 51,41.7 51,40 C51,37.5 52.5,35 54,32 Z" />
+
+    <!-- Base Stand Ribbon -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M38,76 L70,76 L73,81 L65,79 L54,82 L43,79 L35,81 Z" />
+</vector>

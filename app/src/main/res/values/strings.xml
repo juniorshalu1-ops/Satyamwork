@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Shikshak Sathi</string>
+    <string name="app_name_hi">शिक्षक साथी</string>
+    <string name="app_tagline">शिक्षकों का स्वतंत्र डिजिटल साथी एवं प्रबंधन पोर्टल</string>
+    <string name="nav_home">होम</string>
+    <string name="nav_salary">वेतन</string>
+    <string name="nav_activities">गतिविधियाँ</string>
+    <string name="nav_updates">अपडेट्स</string>
+    <string name="nav_tools">टूल्स</string>
+</resources>
+
